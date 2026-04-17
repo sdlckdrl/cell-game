@@ -62,6 +62,7 @@ type gameState struct {
 	foods        []*food
 	cacti        []*cactus
 	wormholes    []*wormhole
+	chats        []chatEntry
 	config       runtimeConfig
 	spatialCache *spatialGrid
 }
@@ -158,6 +159,7 @@ type inputMessage struct {
 	Direction  direction `json:"direction"`
 	UseAbility bool      `json:"useAbility"`
 	UseSplit   bool      `json:"useSplit"`
+	Message    string    `json:"message,omitempty"`
 }
 
 type snapshotMessage struct {
@@ -167,6 +169,7 @@ type snapshotMessage struct {
 	Cacti       []*cactus      `json:"cacti"`
 	Wormholes   []*wormhole    `json:"wormholes"`
 	Leaderboard []ownerSummary `json:"leaderboard"`
+	Chats       []chatEntry    `json:"chats"`
 }
 
 type ownerSummary struct {
@@ -174,6 +177,13 @@ type ownerSummary struct {
 	Nickname string  `json:"nickname"`
 	Mass     float64 `json:"mass"`
 	IsBot    bool    `json:"isBot"`
+}
+
+type chatEntry struct {
+	ID       string `json:"id"`
+	Nickname string `json:"nickname"`
+	Message  string `json:"message"`
+	IsBot    bool   `json:"isBot"`
 }
 
 type adminStatusResponse struct {
@@ -249,6 +259,7 @@ func main() {
 		foods:     make([]*food, 0, foodTarget),
 		cacti:     make([]*cactus, 0, cactusTarget),
 		wormholes: make([]*wormhole, 0, defaultWormholePairs*2),
+		chats:     make([]chatEntry, 0, 20),
 		config: runtimeConfig{
 			MinimumPlayers: defaultMinimumPlayers,
 			WormholePairs:  defaultWormholePairs,
@@ -511,6 +522,10 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 		if err := json.Unmarshal(payload, &msg); err != nil {
 			continue
 		}
+		if msg.Type == "chat" {
+			s.handleChatMessage(playerID, ws, msg.Message)
+			continue
+		}
 		if msg.Type != "input" {
 			continue
 		}
@@ -538,6 +553,33 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 			}
 		}
 		s.mu.Unlock()
+	}
+}
+
+func (s *gameState) handleChatMessage(playerID string, ws *wsConn, raw string) {
+	message := sanitizeChatMessage(raw)
+	if message == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, ok := s.players[playerID]
+	if !ok || p.Conn != ws {
+		return
+	}
+
+	entry := chatEntry{
+		ID:       randomID(),
+		Nickname: p.Nickname,
+		Message:  message,
+		IsBot:    p.IsBot,
+	}
+	s.chats = append(s.chats, entry)
+	if len(s.chats) > 20 {
+		copy(s.chats, s.chats[len(s.chats)-20:])
+		s.chats = s.chats[:20]
 	}
 }
 
@@ -790,6 +832,7 @@ func (s *gameState) broadcastSnapshot() {
 		message snapshotMessage
 	}
 	var targets []snapshotTarget
+	chats := cloneChats(s.chats)
 
 	// 3. 접속 중인 유저별로 타겟 페이로드 생성
 	for _, viewer := range s.players {
@@ -867,6 +910,7 @@ func (s *gameState) broadcastSnapshot() {
 				Cacti:       cacti,
 				Wormholes:   wormholes,
 				Leaderboard: leaderboard,
+				Chats:       chats,
 			},
 		})
 	}
@@ -945,6 +989,7 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 		wormholes = append(wormholes, &copyHole)
 	}
 	leaderboard := buildOwnerLeaderboard(s.players)
+	chats := cloneChats(s.chats)
 	s.mu.RUnlock()
 
 	return json.Marshal(snapshotMessage{
@@ -954,6 +999,7 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 		Cacti:       cacti,
 		Wormholes:   wormholes,
 		Leaderboard: leaderboard,
+		Chats:       chats,
 	})
 }
 
@@ -1248,6 +1294,8 @@ func (s *gameState) handleConsumedPlayerLocked(victim *player) {
 	victim.CactusUntil = successor.CactusUntil
 	victim.PortalUntil = successor.PortalUntil
 	victim.MergeReadyAt = successor.MergeReadyAt
+	victim.IsAbilityActive = successor.IsAbilityActive
+	victim.Energy = successor.Energy
 	delete(s.players, successor.ID)
 }
 
@@ -1552,6 +1600,16 @@ func sanitizeNickname(value string) string {
 	return trimmed
 }
 
+func sanitizeChatMessage(value string) string {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.ReplaceAll(trimmed, "\r", " ")
+	trimmed = strings.ReplaceAll(trimmed, "\n", " ")
+	if len(trimmed) > 96 {
+		trimmed = trimmed[:96]
+	}
+	return strings.TrimSpace(trimmed)
+}
+
 func sanitizeCellType(value string) string {
 	switch value {
 	case "blink", "giant", "shield", "magnet", "divider":
@@ -1559,6 +1617,15 @@ func sanitizeCellType(value string) string {
 	default:
 		return "classic"
 	}
+}
+
+func cloneChats(entries []chatEntry) []chatEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]chatEntry, len(entries))
+	copy(cloned, entries)
+	return cloned
 }
 
 func abilityName(cellType string) string {
@@ -1618,6 +1685,9 @@ func (s *gameState) tryUseAbility(p *player) {
 	}
 
 	switch p.CellType {
+	case "classic":
+		// Classic uses a held overclock state driven by Energy, not a server cooldown.
+		return
 	case "blink":
 		blinkDistance := 180.0
 		length := math.Hypot(p.Direction.X, p.Direction.Y)
@@ -1724,6 +1794,7 @@ func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
 			MergeReadyAt:   now.Add(dividerMergeDelay),
 			LastSeen:       fragment.LastSeen,
 			NextBotThinkAt: fragment.NextBotThinkAt,
+			IsAbilityActive: fragment.IsAbilityActive,
 			Energy:         fragment.Energy,
 		}
 
@@ -2001,12 +2072,37 @@ func randomBotCellType() string {
 }
 
 func randomBotNickname(index int) string {
-	prefixes := []string{"Nova", "Lumi", "Aero", "Milo", "Rin", "Nex", "Sora", "Kai", "Yuna", "Theo", "Lyn", "Iris"}
-	suffixes := []string{"Fox", "Ray", "Bit", "Run", "Pulse", "Mint", "Zero", "Core", "Dash", "Pop", "Wave", "Byte"}
-	if mathrand.Float64() < 0.35 {
-		return fmt.Sprintf("%s%d", prefixes[mathrand.Intn(len(prefixes))], 10+((index+mathrand.Intn(70))%90))
+	englishFirst := []string{"Nova", "Lumi", "Aero", "Milo", "Rin", "Nex", "Sora", "Kai", "Yuna", "Theo", "Lyn", "Iris"}
+	englishLast := []string{"Fox", "Ray", "Bit", "Run", "Pulse", "Mint", "Zero", "Core", "Dash", "Pop", "Wave", "Byte"}
+	korean := []string{"하루", "서준", "지안", "도윤", "민서", "유나", "시우", "은호", "나린", "태오", "하린", "수아"}
+	chinese := []string{"小龙", "雨晨", "子轩", "可欣", "星宇", "明哲", "安琪", "梓涵", "天佑", "欣怡", "浩然", "若曦"}
+	japanese := []string{"ハル", "ユイ", "ソラ", "レン", "ミオ", "アオイ", "リク", "ユナ", "ナギ", "カイ", "ヒナ", "サラ"}
+
+	switch mathrand.Intn(4) {
+	case 0:
+		if mathrand.Float64() < 0.45 {
+			return fmt.Sprintf("%s%d", englishFirst[mathrand.Intn(len(englishFirst))], 10+((index+mathrand.Intn(70))%90))
+		}
+		return englishFirst[mathrand.Intn(len(englishFirst))] + englishLast[mathrand.Intn(len(englishLast))]
+	case 1:
+		name := korean[mathrand.Intn(len(korean))]
+		if mathrand.Float64() < 0.3 {
+			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+		}
+		return name
+	case 2:
+		name := chinese[mathrand.Intn(len(chinese))]
+		if mathrand.Float64() < 0.25 {
+			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+		}
+		return name
+	default:
+		name := japanese[mathrand.Intn(len(japanese))]
+		if mathrand.Float64() < 0.25 {
+			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+		}
+		return name
 	}
-	return prefixes[mathrand.Intn(len(prefixes))] + suffixes[mathrand.Intn(len(suffixes))]
 }
 
 func (s *gameState) updateBotLocked(p *player, now time.Time) {

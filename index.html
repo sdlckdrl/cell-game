@@ -60,6 +60,22 @@
     <button id="minimapToggle" class="minimap-toggle" type="button" aria-expanded="true">지도 접기</button>
     <canvas id="minimapCanvas" width="180" height="180"></canvas>
   </div>
+  <div id="chatPanel" class="chat-panel hidden">
+    <div class="chat-header">
+      <strong>채팅</strong>
+      <div class="chat-header-actions">
+        <span id="chatHint">Enter로 전송</span>
+        <button id="chatToggle" class="panel-toggle" type="button" aria-expanded="true">채팅 접기</button>
+      </div>
+    </div>
+    <div id="chatBody" class="chat-body">
+      <div id="chatMessages" class="chat-messages"></div>
+      <form id="chatForm" class="chat-form" autocomplete="off">
+        <input id="chatInput" type="text" maxlength="96" placeholder="메시지를 입력하세요">
+        <button type="submit">전송</button>
+      </form>
+    </div>
+  </div>
   <div id="touchControls" class="touch-controls hidden">
     <div id="touchPad" class="touch-pad">
       <div id="touchStick" class="touch-stick"></div>

@@ -13,6 +13,12 @@ const minimap = document.getElementById("minimap");
 const minimapToggle = document.getElementById("minimapToggle");
 const minimapCanvas = document.getElementById("minimapCanvas");
 const minimapCtx = minimapCanvas.getContext("2d");
+const chatPanel = document.getElementById("chatPanel");
+const chatToggle = document.getElementById("chatToggle");
+const chatBody = document.getElementById("chatBody");
+const chatMessages = document.getElementById("chatMessages");
+const chatForm = document.getElementById("chatForm");
+const chatInput = document.getElementById("chatInput");
 const touchControls = document.getElementById("touchControls");
 const touchPad = document.getElementById("touchPad");
 const touchStick = document.getElementById("touchStick");
@@ -93,6 +99,7 @@ const state = {
   nickname: "",
   players: [],
   leaderboard: [],
+  chats: [],
   renderPlayers: new Map(),
   foods: [],
   cacti: [],
@@ -118,6 +125,8 @@ const state = {
   time: 0,
   leaderboardCollapsed: false,
   minimapCollapsed: false,
+  chatCollapsed: false,
+  chatLastActivityAt: 0,
   isTouchDevice: matchMedia("(pointer: coarse)").matches || "ontouchstart" in window,
   touch: {
     active: false,
@@ -130,22 +139,37 @@ const state = {
   },
 };
 
+function isTypingInField() {
+  const active = document.activeElement;
+  return active === nicknameInput || active === chatInput;
+}
+
 if (state.isTouchDevice) {
   document.body.classList.add("touch-device");
 }
 
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
+  if (isTypingInField()) {
+    return;
+  }
   if (event.code === "Space") { // 꾹 누를 때 연속 입력 허용
     state.abilityPressed = true;
   }
   if (event.code === "KeyW" && !event.repeat) {
     state.splitPressed = true;
   }
+  if (event.code === "Enter" && state.connected) {
+    event.preventDefault();
+    chatInput.focus();
+  }
 });
 
 // ✅ 새로 추가: 키를 뗄 때 가속 중지
 window.addEventListener("keyup", (event) => {
+  if (isTypingInField()) {
+    return;
+  }
   if (event.code === "Space") {
     state.abilityPressed = false;
   }
@@ -214,6 +238,20 @@ leaderboardToggle.addEventListener("click", () => {
   leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
   leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
 });
+chatToggle.addEventListener("click", () => {
+  state.chatCollapsed = !state.chatCollapsed;
+  chatPanel.classList.toggle("collapsed", state.chatCollapsed);
+  chatToggle.textContent = state.chatCollapsed ? "채팅 열기" : "채팅 접기";
+  chatToggle.setAttribute("aria-expanded", String(!state.chatCollapsed));
+  if (!state.chatCollapsed) {
+    markChatActivity();
+  }
+});
+
+chatForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  sendChat();
+});
 
 renderCellOptions();
 
@@ -274,6 +312,7 @@ function connectSocket() {
     hud.classList.remove("hidden");
     leaderboard.classList.remove("hidden");
     minimap.classList.remove("hidden");
+    chatPanel.classList.remove("hidden");
     if (state.isTouchDevice) {
       touchControls.classList.remove("hidden");
     }
@@ -295,6 +334,17 @@ function connectSocket() {
       state.lastSnapshotAt = snapshotAt;
       state.players = data.players;
       state.leaderboard = data.leaderboard || [];
+      const nextChats = data.chats || [];
+      if (nextChats.length !== state.chats.length) {
+        markChatActivity();
+      } else if (nextChats.length > 0) {
+        const prevLast = state.chats[state.chats.length - 1];
+        const nextLast = nextChats[nextChats.length - 1];
+        if (!prevLast || !nextLast || prevLast.id !== nextLast.id) {
+          markChatActivity();
+        }
+      }
+      state.chats = nextChats;
       state.foods = data.foods;
       state.cacti = data.cacti || [];
       state.wormholes = data.wormholes || [];
@@ -308,6 +358,7 @@ function connectSocket() {
         updateAbilityHud(me);
       }
       renderLeaderboard();
+      renderChat();
     }
   });
 
@@ -353,6 +404,23 @@ function sendInput() {
     useSplit: state.splitPressed,
   }));
   state.splitPressed = false;
+}
+
+function sendChat() {
+  const text = chatInput.value.trim().slice(0, 96);
+  if (!text || !state.connected || !state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  state.socket.send(JSON.stringify({
+    type: "chat",
+    message: text,
+  }));
+  chatInput.value = "";
+  markChatActivity();
+  if (state.isTouchDevice) {
+    chatInput.blur();
+  }
 }
 
 function loop(timestamp) {
@@ -730,10 +798,41 @@ function renderLeaderboard() {
   `;
 }
 
+function renderChat() {
+  const idleSeconds = (performance.now() - state.chatLastActivityAt) / 1000;
+  chatPanel.classList.toggle("faded", !state.chatCollapsed && state.chats.length > 0 && idleSeconds > 4);
+  const items = state.chats.slice(-12);
+  if (items.length === 0) {
+    chatMessages.innerHTML = `<div class="chat-entry"><div class="chat-text">아직 채팅이 없습니다.</div></div>`;
+    return;
+  }
+
+  chatMessages.innerHTML = items.map((entry) => `
+    <div class="chat-entry ${entry.isBot ? "bot" : ""}">
+      <div class="chat-name">${escapeHtml(entry.nickname)}</div>
+      <div class="chat-text">${escapeHtml(entry.message)}</div>
+    </div>
+  `).join("");
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function markChatActivity() {
+  state.chatLastActivityAt = performance.now();
+  chatPanel.classList.remove("faded");
+}
+
 function showMessage(text) {
   messageBox.textContent = text;
   messageBox.classList.remove("hidden");
   state.messageTimer = 2.2;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function ensureSocketConnection() {

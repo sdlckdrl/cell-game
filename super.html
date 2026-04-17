@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
@@ -12,6 +12,7 @@
       --text: #eef7ff;
       --muted: #98afc7;
       --accent: #8affcf;
+      --danger: #ff9aa8;
     }
 
     * { box-sizing: border-box; }
@@ -95,6 +96,13 @@
       color: var(--text);
     }
 
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 4px;
+    }
+
     button {
       width: fit-content;
       padding: 12px 18px;
@@ -106,9 +114,20 @@
       cursor: pointer;
     }
 
+    button.secondary {
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+
     .status {
-      margin-top: 10px;
+      margin-top: 12px;
       color: var(--muted);
+      min-height: 1.2em;
+    }
+
+    .status.error {
+      color: var(--danger);
     }
 
     @media (max-width: 720px) {
@@ -122,7 +141,7 @@
     <section class="panel">
       <p class="eyebrow">Super Admin</p>
       <h1>서버 제어판</h1>
-      <p class="status">현재 접속 인원과 런타임 값을 실시간으로 조정할 수 있습니다.</p>
+      <p class="status">현재 접속 인원과 속도 관련 값을 실시간으로 조절할 수 있습니다.</p>
       <div class="stats">
         <div class="stat">
           <span>실유저</span>
@@ -140,11 +159,15 @@
     </section>
 
     <section class="panel">
-      <h2>런타임 설정</h2>
+      <h2>서버 설정</h2>
       <form id="configForm">
         <label>
           최소 총 인원수
           <input id="minimumPlayers" type="number" min="0" step="1">
+        </label>
+        <label>
+          블랙홀/화이트홀 세트 수
+          <input id="wormholePairs" type="number" min="0" step="1">
         </label>
         <label>
           기본 속도 계수
@@ -158,7 +181,10 @@
           최소 속도 바닥값
           <input id="minimumSpeed" type="number" min="1" step="1">
         </label>
-        <button type="submit">설정 저장</button>
+        <div class="actions">
+          <button type="submit">설정 저장</button>
+          <button id="refreshButton" class="secondary" type="button">다시 불러오기</button>
+        </div>
       </form>
       <p id="saveStatus" class="status">서버 상태를 불러오는 중입니다.</p>
     </section>
@@ -169,54 +195,109 @@
     const botCount = document.getElementById("botCount");
     const totalCount = document.getElementById("totalCount");
     const minimumPlayers = document.getElementById("minimumPlayers");
+    const wormholePairs = document.getElementById("wormholePairs");
     const baseSpeed = document.getElementById("baseSpeed");
     const speedDivisor = document.getElementById("speedDivisor");
     const minimumSpeed = document.getElementById("minimumSpeed");
     const saveStatus = document.getElementById("saveStatus");
     const configForm = document.getElementById("configForm");
+    const refreshButton = document.getElementById("refreshButton");
 
-    async function loadStatus() {
+    const inputs = [minimumPlayers, wormholePairs, baseSpeed, speedDivisor, minimumSpeed];
+    let isDirty = false;
+    let isSaving = false;
+
+    function setStatus(text, isError = false) {
+      saveStatus.textContent = text;
+      saveStatus.classList.toggle("error", isError);
+    }
+
+    function applyConfig(config) {
+      minimumPlayers.value = config.minimumPlayers;
+      wormholePairs.value = config.wormholePairs;
+      baseSpeed.value = config.baseSpeed;
+      speedDivisor.value = config.speedDivisor;
+      minimumSpeed.value = config.minimumSpeed;
+      isDirty = false;
+    }
+
+    async function loadStatus(force = false) {
+      if (!force && (isDirty || isSaving)) {
+        return;
+      }
+
       try {
-        const response = await fetch("/api/admin/status");
-        if (!response.ok) throw new Error("status failed");
+        const response = await fetch(`/api/admin/status?t=${Date.now()}`, {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`status failed: ${response.status}`);
+        }
+
         const data = await response.json();
         humanCount.textContent = data.humanPlayers;
         botCount.textContent = data.botPlayers;
         totalCount.textContent = data.totalPlayers;
-        minimumPlayers.value = data.config.minimumPlayers;
-        baseSpeed.value = data.config.baseSpeed;
-        speedDivisor.value = data.config.speedDivisor;
-        minimumSpeed.value = data.config.minimumSpeed;
-        saveStatus.textContent = "서버와 동기화되었습니다.";
-      } catch {
-        saveStatus.textContent = "상태를 불러오지 못했습니다.";
+        applyConfig(data.config);
+        setStatus("서버와 동기화되었습니다.");
+      } catch (error) {
+        setStatus(`상태를 불러오지 못했습니다. ${error.message}`, true);
       }
     }
 
+    inputs.forEach((input) => {
+      input.addEventListener("input", () => {
+        isDirty = true;
+        setStatus("수정 중입니다. 저장하면 바로 반영됩니다.");
+      });
+    });
+
+    refreshButton.addEventListener("click", () => {
+      loadStatus(true);
+    });
+
     configForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      saveStatus.textContent = "저장 중입니다...";
+      isSaving = true;
+      setStatus("설정을 저장하는 중입니다...");
+
       try {
+        const payload = {
+          minimumPlayers: Number(minimumPlayers.value),
+          wormholePairs: Number(wormholePairs.value),
+          baseSpeed: Number(baseSpeed.value),
+          speedDivisor: Number(speedDivisor.value),
+          minimumSpeed: Number(minimumSpeed.value),
+        };
+
         const response = await fetch("/api/admin/config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            minimumPlayers: Number(minimumPlayers.value),
-            baseSpeed: Number(baseSpeed.value),
-            speedDivisor: Number(speedDivisor.value),
-            minimumSpeed: Number(minimumSpeed.value),
-          }),
+          credentials: "same-origin",
+          cache: "no-store",
+          body: JSON.stringify(payload),
         });
-        if (!response.ok) throw new Error("save failed");
-        saveStatus.textContent = "설정을 저장했습니다.";
-        loadStatus();
-      } catch {
-        saveStatus.textContent = "설정 저장에 실패했습니다.";
+
+        if (!response.ok) {
+          throw new Error(`save failed: ${response.status}`);
+        }
+
+        const savedConfig = await response.json();
+        applyConfig(savedConfig);
+        setStatus("설정이 저장되어 서버에 즉시 반영되었습니다.");
+        await loadStatus(true);
+      } catch (error) {
+        setStatus(`설정 저장에 실패했습니다. ${error.message}`, true);
+      } finally {
+        isSaving = false;
       }
     });
 
-    loadStatus();
-    setInterval(loadStatus, 2000);
+    loadStatus(true);
+    setInterval(() => {
+      loadStatus(false);
+    }, 2000);
   </script>
 </body>
 </html>

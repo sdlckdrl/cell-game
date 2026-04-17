@@ -9,3 +9,5 @@ game_server
 # 각종 로그 파일
 *.log
 nohup.out
+
+.gocache/

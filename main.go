@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,13 +27,21 @@ const (
 	worldSize       = 3600.0
 	foodTarget      = 320
 	cactusTarget    = 28
+	defaultWormholePairs = 3
 	playerStartMass = 36.0
 	tickRate        = 30
 	playerTimeout   = 60 * time.Second
+	playerCullRange = 1280.0
+	foodCullRange   = 1460.0
+	objectCullRange = 1600.0
 	defaultMinimumPlayers = 20
 	defaultBaseSpeed      = 285.0
 	defaultSpeedDivisor   = 8.5
 	defaultMinimumSpeed   = 92.0
+	dividerSplitCooldown  = 1400 * time.Millisecond
+	dividerMergeDelay     = 7 * time.Second
+	dividerMinSplitMass   = 40.0
+	dividerMaxFragments   = 16
 )
 
 var mimeTypes = map[string]string{
@@ -43,15 +52,17 @@ var mimeTypes = map[string]string{
 }
 
 type gameState struct {
-	mu      sync.RWMutex
-	players map[string]*player
-	foods   []*food
-	cacti   []*cactus
-	config  runtimeConfig
+	mu        sync.RWMutex
+	players   map[string]*player
+	foods     []*food
+	cacti     []*cactus
+	wormholes []*wormhole
+	config    runtimeConfig
 }
 
 type runtimeConfig struct {
 	MinimumPlayers int     `json:"minimumPlayers"`
+	WormholePairs  int     `json:"wormholePairs"`
 	BaseSpeed      float64 `json:"baseSpeed"`
 	SpeedDivisor   float64 `json:"speedDivisor"`
 	MinimumSpeed   float64 `json:"minimumSpeed"`
@@ -60,6 +71,7 @@ type runtimeConfig struct {
 type player struct {
 	ID        string    `json:"id"`
 	SessionID string    `json:"-"`
+	OwnerID   string    `json:"ownerId"`
 	Nickname  string    `json:"nickname"`
 	CellType  string    `json:"cellType"`
 	Ability   string    `json:"abilityName"`
@@ -76,6 +88,8 @@ type player struct {
 	CooldownUntil          time.Time `json:"-"`
 	EffectUntil            time.Time `json:"-"`
 	CactusUntil            time.Time `json:"-"`
+	PortalUntil            time.Time `json:"-"`
+	MergeReadyAt           time.Time `json:"-"`
 	LastSeen               time.Time `json:"-"`
 	NextBotThinkAt         time.Time `json:"-"`
 	Conn                   *wsConn   `json:"-"`
@@ -104,6 +118,16 @@ type cactus struct {
 	Height float64 `json:"height"`
 }
 
+type wormhole struct {
+	ID        string  `json:"id"`
+	Kind      string  `json:"kind"`
+	PairID    string  `json:"pairId"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Radius    float64 `json:"radius"`
+	PullRange float64 `json:"pullRange"`
+}
+
 type joinRequest struct {
 	Nickname string `json:"nickname"`
 	CellType string `json:"cellType"`
@@ -129,10 +153,19 @@ type inputMessage struct {
 }
 
 type snapshotMessage struct {
-	Type    string    `json:"type"`
-	Players []*player `json:"players"`
-	Foods   []*food   `json:"foods"`
-	Cacti   []*cactus `json:"cacti"`
+	Type        string         `json:"type"`
+	Players     []*player      `json:"players"`
+	Foods       []*food        `json:"foods"`
+	Cacti       []*cactus      `json:"cacti"`
+	Wormholes   []*wormhole    `json:"wormholes"`
+	Leaderboard []ownerSummary `json:"leaderboard"`
+}
+
+type ownerSummary struct {
+	OwnerID  string  `json:"ownerId"`
+	Nickname string  `json:"nickname"`
+	Mass     float64 `json:"mass"`
+	IsBot    bool    `json:"isBot"`
 }
 
 type adminStatusResponse struct {
@@ -144,6 +177,7 @@ type adminStatusResponse struct {
 
 type adminConfigRequest struct {
 	MinimumPlayers *int     `json:"minimumPlayers"`
+	WormholePairs  *int     `json:"wormholePairs"`
 	BaseSpeed      *float64 `json:"baseSpeed"`
 	SpeedDivisor   *float64 `json:"speedDivisor"`
 	MinimumSpeed   *float64 `json:"minimumSpeed"`
@@ -158,11 +192,13 @@ func main() {
 	mathrand.Seed(time.Now().UnixNano())
 
 	state := &gameState{
-		players: make(map[string]*player),
-		foods:   make([]*food, 0, foodTarget),
-		cacti:   make([]*cactus, 0, cactusTarget),
+		players:   make(map[string]*player),
+		foods:     make([]*food, 0, foodTarget),
+		cacti:     make([]*cactus, 0, cactusTarget),
+		wormholes: make([]*wormhole, 0, defaultWormholePairs*2),
 		config: runtimeConfig{
 			MinimumPlayers: defaultMinimumPlayers,
+			WormholePairs:  defaultWormholePairs,
 			BaseSpeed:      defaultBaseSpeed,
 			SpeedDivisor:   defaultSpeedDivisor,
 			MinimumSpeed:   defaultMinimumSpeed,
@@ -170,6 +206,7 @@ func main() {
 	}
 	state.seedFoods()
 	state.seedCacti()
+	state.reconcileWormholesLocked()
 	state.reconcileBotsLocked()
 	go state.runWorld()
 
@@ -205,6 +242,7 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 	p := &player{
 		ID:        playerID,
 		SessionID: sessionID,
+		OwnerID:   playerID,
 		Nickname:  nickname,
 		CellType:  cellType,
 		Ability:   abilityName(cellType),
@@ -304,6 +342,9 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.MinimumPlayers != nil {
 		s.config.MinimumPlayers = int(math.Max(0, float64(*req.MinimumPlayers)))
 	}
+	if req.WormholePairs != nil {
+		s.config.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
+	}
 	if req.BaseSpeed != nil {
 		s.config.BaseSpeed = math.Max(50, *req.BaseSpeed)
 	}
@@ -313,6 +354,7 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.MinimumSpeed != nil {
 		s.config.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
 	}
+	s.reconcileWormholesLocked()
 	s.reconcileBotsLocked()
 	config := s.config
 	s.mu.Unlock()
@@ -387,7 +429,7 @@ func (s *gameState) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	if err := s.sendSnapshotTo(ws); err != nil {
+	if err := s.sendSnapshotTo(playerID, ws); err != nil {
 		s.dropConnection(playerID, ws)
 		return
 	}
@@ -421,14 +463,23 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 
 		s.mu.Lock()
 		if p, ok := s.players[playerID]; ok && p.Conn == ws {
-			p.Direction.X = clamp(msg.Direction.X, -1, 1)
-			p.Direction.Y = clamp(msg.Direction.Y, -1, 1)
-			p.LastSeen = time.Now()
+			ownerID := p.OwnerID
+			if ownerID == "" {
+				ownerID = p.ID
+			}
+			now := time.Now()
+			for _, fragment := range s.ownedPlayersLocked(ownerID) {
+				fragment.Direction.X = clamp(msg.Direction.X, -1, 1)
+				fragment.Direction.Y = clamp(msg.Direction.Y, -1, 1)
+				fragment.LastSeen = now
+			}
 			if msg.UseAbility {
 				s.tryUseAbility(p)
 			}
 			if msg.UseSplit {
-				s.trySplit(p)
+				for _, fragment := range s.ownedPlayersLocked(ownerID) {
+					s.trySplit(fragment)
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -498,6 +549,7 @@ func (s *gameState) updateWorld() {
 		if p.CellType == "magnet" && now.Before(p.EffectUntil) {
 			s.pullNearbyFoodLocked(p, 220)
 		}
+		s.applyWormholeForceLocked(p, now)
 		s.resolveCactusHitLocked(p, now)
 
 		for i := len(s.foods) - 1; i >= 0; i-- {
@@ -511,7 +563,9 @@ func (s *gameState) updateWorld() {
 	}
 
 	s.reconcileBotsLocked()
+	s.applyOwnedCohesionLocked(now)
 	s.resolvePlayerEating()
+	s.resolveOwnedMergesLocked(now)
 	s.topUpFoods()
 }
 
@@ -531,16 +585,19 @@ func (s *gameState) resolvePlayerEating() {
 			if _, ok := s.players[b.ID]; !ok {
 				continue
 			}
+			if a.OwnerID != "" && a.OwnerID == b.OwnerID {
+				continue
+			}
 
 			gap := distance(a.X, a.Y, b.X, b.Y)
 			if canEatPlayer(a, b, gap) {
 				a.Mass += b.Mass * 0.85
 				a.Radius = massToRadius(a.Mass)
-				respawnPlayer(b)
+				s.handleConsumedPlayerLocked(b)
 			} else if canEatPlayer(b, a, gap) {
 				b.Mass += a.Mass * 0.85
 				b.Radius = massToRadius(b.Mass)
-				respawnPlayer(a)
+				s.handleConsumedPlayerLocked(a)
 			}
 		}
 	}
@@ -548,68 +605,106 @@ func (s *gameState) resolvePlayerEating() {
 
 func (s *gameState) broadcastSnapshot() {
 	s.mu.RLock()
-	players := make([]*player, 0, len(s.players))
-	conns := make([]*wsConn, 0, len(s.players))
-
-	for _, p := range s.players {
-		players = append(players, clonePlayer(p))
-		if p.Conn != nil {
-			conns = append(conns, p.Conn)
-		}
+	type snapshotTarget struct {
+		playerID string
+		conn     *wsConn
 	}
-
-	foods := make([]*food, len(s.foods))
-	for i, f := range s.foods {
-		copyFood := *f
-		foods[i] = &copyFood
+	targets := make([]snapshotTarget, 0, len(s.players))
+	for _, p := range s.players {
+		if p.Conn != nil {
+			targets = append(targets, snapshotTarget{
+				playerID: p.ID,
+				conn:     p.Conn,
+			})
+		}
 	}
 	s.mu.RUnlock()
 
-	if len(conns) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
-	payload, err := json.Marshal(snapshotMessage{
-		Type:    "snapshot",
-		Players: players,
-		Foods:   foods,
-		Cacti:   s.cloneCacti(),
-	})
-	if err != nil {
-		return
-	}
-
-	for _, conn := range conns {
-		if err := conn.writeText(payload); err != nil {
-			conn.close()
+	for _, target := range targets {
+		payload, err := s.buildSnapshotPayload(target.playerID)
+		if err != nil {
+			continue
+		}
+		if err := target.conn.writeText(payload); err != nil {
+			target.conn.close()
 		}
 	}
 }
 
-func (s *gameState) sendSnapshotTo(conn *wsConn) error {
-	s.mu.RLock()
-	players := make([]*player, 0, len(s.players))
-	for _, p := range s.players {
-		players = append(players, clonePlayer(p))
-	}
-	foods := make([]*food, len(s.foods))
-	for i, f := range s.foods {
-		copyFood := *f
-		foods[i] = &copyFood
-	}
-	s.mu.RUnlock()
-
-	payload, err := json.Marshal(snapshotMessage{
-		Type:    "snapshot",
-		Players: players,
-		Foods:   foods,
-		Cacti:   s.cloneCacti(),
-	})
+func (s *gameState) sendSnapshotTo(playerID string, conn *wsConn) error {
+	payload, err := s.buildSnapshotPayload(playerID)
 	if err != nil {
 		return err
 	}
-
 	return conn.writeText(payload)
+}
+
+func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
+	s.mu.RLock()
+	viewer, ok := s.players[playerID]
+	if !ok {
+		s.mu.RUnlock()
+		return nil, fmt.Errorf("viewer not found")
+	}
+	viewerOwnerID := viewer.OwnerID
+	if viewerOwnerID == "" {
+		viewerOwnerID = viewer.ID
+	}
+	centerX, centerY := s.ownerCenterLocked(viewerOwnerID)
+
+	players := make([]*player, 0, len(s.players))
+	for _, p := range s.players {
+		targetOwnerID := p.OwnerID
+		if targetOwnerID == "" {
+			targetOwnerID = p.ID
+		}
+		if targetOwnerID != viewerOwnerID && !isWithinCullRange(centerX, centerY, p.X, p.Y, playerCullRange+currentRadius(p)) {
+			continue
+		}
+		players = append(players, clonePlayer(p))
+	}
+
+	foods := make([]*food, 0, len(s.foods))
+	for _, f := range s.foods {
+		if !isWithinCullRange(centerX, centerY, f.X, f.Y, foodCullRange+f.Radius) {
+			continue
+		}
+		copyFood := *f
+		foods = append(foods, &copyFood)
+	}
+
+	cacti := make([]*cactus, 0, len(s.cacti))
+	for _, c := range s.cacti {
+		if !isWithinCullRange(centerX, centerY, c.X, c.Y, objectCullRange+c.Size*1.3) {
+			continue
+		}
+		copyCactus := *c
+		cacti = append(cacti, &copyCactus)
+	}
+
+	wormholes := make([]*wormhole, 0, len(s.wormholes))
+	for _, hole := range s.wormholes {
+		if !isWithinCullRange(centerX, centerY, hole.X, hole.Y, objectCullRange+hole.PullRange) {
+			continue
+		}
+		copyHole := *hole
+		wormholes = append(wormholes, &copyHole)
+	}
+	leaderboard := buildOwnerLeaderboard(s.players)
+	s.mu.RUnlock()
+
+	return json.Marshal(snapshotMessage{
+		Type:        "snapshot",
+		Players:     players,
+		Foods:       foods,
+		Cacti:       cacti,
+		Wormholes:   wormholes,
+		Leaderboard: leaderboard,
+	})
 }
 
 func (s *gameState) seedFoods() {
@@ -621,6 +716,28 @@ func (s *gameState) seedFoods() {
 func (s *gameState) seedCacti() {
 	for len(s.cacti) < cactusTarget {
 		s.cacti = append(s.cacti, createCactus())
+	}
+}
+
+func (s *gameState) reconcileWormholesLocked() {
+	targetPairs := s.config.WormholePairs
+	if targetPairs < 0 {
+		targetPairs = 0
+	}
+
+	targetCount := targetPairs * 2
+	for len(s.wormholes) > targetCount {
+		s.wormholes = s.wormholes[:len(s.wormholes)-2]
+	}
+
+	for len(s.wormholes) < targetCount {
+		pairID := randomID()
+		entry := createWormhole("blackhole", pairID)
+		exit := createWormhole("whitehole", pairID)
+		for distance(entry.X, entry.Y, exit.X, exit.Y) < 700 {
+			exit = createWormhole("whitehole", pairID)
+		}
+		s.wormholes = append(s.wormholes, entry, exit)
 	}
 }
 
@@ -743,16 +860,36 @@ func createCactus() *cactus {
 	}
 }
 
+func createWormhole(kind, pairID string) *wormhole {
+	radius := 34 + mathrand.Float64()*10
+	return &wormhole{
+		ID:        randomID(),
+		Kind:      kind,
+		PairID:    pairID,
+		X:         240 + mathrand.Float64()*(worldSize-480),
+		Y:         240 + mathrand.Float64()*(worldSize-480),
+		Radius:    radius,
+		PullRange: radius * 4.6,
+	}
+}
+
 func respawnPlayer(p *player) {
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
 	p.Mass = playerStartMass
 	p.Radius = massToRadius(playerStartMass)
 	p.X = 400 + mathrand.Float64()*(worldSize-800)
 	p.Y = 400 + mathrand.Float64()*(worldSize-800)
 	p.Scale = 1
+	p.OwnerID = ownerID
 	p.Direction = direction{}
 	p.CooldownUntil = time.Time{}
 	p.EffectUntil = time.Time{}
 	p.CactusUntil = time.Time{}
+	p.PortalUntil = time.Time{}
+	p.MergeReadyAt = time.Time{}
 }
 
 func clonePlayer(p *player) *player {
@@ -761,6 +898,7 @@ func clonePlayer(p *player) *player {
 	effectRemaining := maxDuration(0, p.EffectUntil.Sub(now))
 	return &player{
 		ID:                p.ID,
+		OwnerID:           p.OwnerID,
 		Nickname:          p.Nickname,
 		CellType:          p.CellType,
 		Ability:           p.Ability,
@@ -776,6 +914,252 @@ func clonePlayer(p *player) *player {
 	}
 }
 
+func (s *gameState) ownedPlayersLocked(ownerID string) []*player {
+	fragments := make([]*player, 0)
+	for _, p := range s.players {
+		currentOwner := p.OwnerID
+		if currentOwner == "" {
+			currentOwner = p.ID
+		}
+		if currentOwner == ownerID {
+			fragments = append(fragments, p)
+		}
+	}
+	return fragments
+}
+
+func (s *gameState) ownerCenterLocked(ownerID string) (float64, float64) {
+	fragments := s.ownedPlayersLocked(ownerID)
+	if len(fragments) == 0 {
+		return worldSize * 0.5, worldSize * 0.5
+	}
+
+	var centerX float64
+	var centerY float64
+	var totalMass float64
+	for _, fragment := range fragments {
+		centerX += fragment.X * fragment.Mass
+		centerY += fragment.Y * fragment.Mass
+		totalMass += fragment.Mass
+	}
+	if totalMass <= 0 {
+		return fragments[0].X, fragments[0].Y
+	}
+	return centerX / totalMass, centerY / totalMass
+}
+
+func (s *gameState) handleConsumedPlayerLocked(victim *player) {
+	ownerID := victim.OwnerID
+	if ownerID == "" {
+		ownerID = victim.ID
+	}
+	fragments := s.ownedPlayersLocked(ownerID)
+	if len(fragments) <= 1 {
+		respawnPlayer(victim)
+		return
+	}
+
+	if victim.ID != ownerID {
+		delete(s.players, victim.ID)
+		return
+	}
+
+	successor := largestOwnedFragmentExcluding(fragments, victim.ID)
+	if successor == nil {
+		respawnPlayer(victim)
+		return
+	}
+
+	victim.X = successor.X
+	victim.Y = successor.Y
+	victim.Mass = successor.Mass
+	victim.Radius = successor.Radius
+	victim.Scale = successor.Scale
+	victim.Direction = successor.Direction
+	victim.CooldownUntil = successor.CooldownUntil
+	victim.EffectUntil = successor.EffectUntil
+	victim.CactusUntil = successor.CactusUntil
+	victim.PortalUntil = successor.PortalUntil
+	victim.MergeReadyAt = successor.MergeReadyAt
+	delete(s.players, successor.ID)
+}
+
+func largestOwnedFragmentExcluding(fragments []*player, excludedID string) *player {
+	var best *player
+	for _, fragment := range fragments {
+		if fragment.ID == excludedID {
+			continue
+		}
+		if best == nil || fragment.Mass > best.Mass {
+			best = fragment
+		}
+	}
+	return best
+}
+
+func buildOwnerLeaderboard(players map[string]*player) []ownerSummary {
+	totals := make(map[string]*ownerSummary)
+	maxMass := make(map[string]float64)
+
+	for _, p := range players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		entry, exists := totals[ownerID]
+		if !exists {
+			entry = &ownerSummary{
+				OwnerID:  ownerID,
+				Nickname: p.Nickname,
+				Mass:     0,
+				IsBot:    p.IsBot,
+			}
+			totals[ownerID] = entry
+		}
+		entry.Mass += p.Mass
+		if p.Mass >= maxMass[ownerID] {
+			maxMass[ownerID] = p.Mass
+			entry.Nickname = p.Nickname
+		}
+	}
+
+	out := make([]ownerSummary, 0, len(totals))
+	for _, entry := range totals {
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Mass > out[j].Mass
+	})
+	return out
+}
+
+func (s *gameState) resolveOwnedMergesLocked(now time.Time) {
+	owners := make(map[string]struct{})
+	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		owners[ownerID] = struct{}{}
+	}
+
+	for ownerID := range owners {
+		fragments := s.ownedPlayersLocked(ownerID)
+		if len(fragments) < 2 {
+			continue
+		}
+		merged := true
+		for merged {
+			merged = false
+			for i := 0; i < len(fragments); i += 1 {
+				a := fragments[i]
+				if _, ok := s.players[a.ID]; !ok {
+					continue
+				}
+				if now.Before(a.MergeReadyAt) {
+					continue
+				}
+				for j := i + 1; j < len(fragments); j += 1 {
+					b := fragments[j]
+					if _, ok := s.players[b.ID]; !ok {
+						continue
+					}
+					if now.Before(b.MergeReadyAt) {
+						continue
+					}
+					if distance(a.X, a.Y, b.X, b.Y) > (currentRadius(a)+currentRadius(b))*0.62 {
+						continue
+					}
+					s.mergeOwnedPairLocked(ownerID, a, b)
+					fragments = s.ownedPlayersLocked(ownerID)
+					merged = true
+					break
+				}
+				if merged {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (s *gameState) applyOwnedCohesionLocked(now time.Time) {
+	owners := make(map[string][]*player)
+	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		owners[ownerID] = append(owners[ownerID], p)
+	}
+
+	for _, fragments := range owners {
+		if len(fragments) < 2 {
+			continue
+		}
+
+		var centerX float64
+		var centerY float64
+		var totalMass float64
+		for _, fragment := range fragments {
+			if now.Before(fragment.MergeReadyAt) {
+				continue
+			}
+			centerX += fragment.X * fragment.Mass
+			centerY += fragment.Y * fragment.Mass
+			totalMass += fragment.Mass
+		}
+		if totalMass <= 0 {
+			continue
+		}
+
+		centerX /= totalMass
+		centerY /= totalMass
+
+		for _, fragment := range fragments {
+			if now.Before(fragment.MergeReadyAt) {
+				continue
+			}
+
+			distToCenter := distance(fragment.X, fragment.Y, centerX, centerY)
+			if distToCenter > 1 {
+				dirX := (centerX - fragment.X) / distToCenter
+				dirY := (centerY - fragment.Y) / distToCenter
+				movementIntent := math.Hypot(fragment.Direction.X, fragment.Direction.Y)
+				idleBoost := 1.0
+				if movementIntent < 0.18 {
+					idleBoost = 2.25
+				} else if movementIntent < 0.45 {
+					idleBoost = 1.45
+				}
+				pull := math.Min(54, distToCenter*0.14) * idleBoost / tickRate
+				radius := currentRadius(fragment)
+				fragment.X = clamp(fragment.X+dirX*pull, radius, worldSize-radius)
+				fragment.Y = clamp(fragment.Y+dirY*pull, radius, worldSize-radius)
+			}
+		}
+	}
+}
+
+func (s *gameState) mergeOwnedPairLocked(ownerID string, a, b *player) {
+	target := a
+	source := b
+	if b.ID == ownerID {
+		target = b
+		source = a
+	} else if a.ID != ownerID && b.Mass > a.Mass {
+		target = b
+		source = a
+	}
+
+	target.X = (target.X*target.Mass + source.X*source.Mass) / math.Max(1, target.Mass+source.Mass)
+	target.Y = (target.Y*target.Mass + source.Y*source.Mass) / math.Max(1, target.Mass+source.Mass)
+	target.Mass += source.Mass
+	target.Radius = massToRadius(target.Mass)
+	target.MergeReadyAt = time.Time{}
+	delete(s.players, source.ID)
+}
+
 func (s *gameState) cloneCacti() []*cactus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -784,6 +1168,18 @@ func (s *gameState) cloneCacti() []*cactus {
 	for i, c := range s.cacti {
 		copyCactus := *c
 		out[i] = &copyCactus
+	}
+	return out
+}
+
+func (s *gameState) cloneWormholes() []*wormhole {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*wormhole, len(s.wormholes))
+	for i, hole := range s.wormholes {
+		copyHole := *hole
+		out[i] = &copyHole
 	}
 	return out
 }
@@ -910,7 +1306,7 @@ func sanitizeNickname(value string) string {
 
 func sanitizeCellType(value string) string {
 	switch value {
-	case "blink", "giant", "shield", "magnet":
+	case "blink", "giant", "shield", "magnet", "divider":
 		return value
 	default:
 		return "classic"
@@ -929,6 +1325,8 @@ func abilityName(cellType string) string {
 		return "보호막"
 	case "magnet":
 		return "흡착"
+	case "divider":
+		return "세포 분열"
 	default:
 		return "질주"
 	}
@@ -949,6 +1347,10 @@ func (s *gameState) movementSpeed(mass float64) float64 {
 
 func distance(ax, ay, bx, by float64) float64 {
 	return math.Hypot(ax-bx, ay-by)
+}
+
+func isWithinCullRange(viewerX, viewerY, targetX, targetY, cullRange float64) bool {
+	return math.Abs(viewerX-targetX) <= cullRange && math.Abs(viewerY-targetY) <= cullRange
 }
 
 func clamp(value, min, max float64) float64 {
@@ -989,6 +1391,8 @@ func (s *gameState) tryUseAbility(p *player) {
 	case "magnet":
 		p.EffectUntil = now.Add(4 * time.Second)
 		p.CooldownUntil = now.Add(9 * time.Second)
+	case "divider":
+		s.tryDividerAbilityLocked(p, now)
 	default:
 		p.CooldownUntil = now.Add(2 * time.Second)
 	}
@@ -1019,6 +1423,73 @@ func (s *gameState) trySplit(p *player) {
 		VY:     dir.Y * 380,
 	}
 	s.foods = append(s.foods, chunk)
+}
+
+func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
+	fragments := s.ownedPlayersLocked(ownerID)
+	if len(fragments) >= dividerMaxFragments {
+		return
+	}
+
+	type splitPlan struct {
+		parent *player
+		child  *player
+	}
+	plans := make([]splitPlan, 0, len(fragments))
+	remainingSlots := dividerMaxFragments - len(fragments)
+
+	for _, fragment := range fragments {
+		if remainingSlots <= 0 {
+			break
+		}
+		if fragment.Mass < dividerMinSplitMass {
+			continue
+		}
+
+		dir := normalizeDirection(fragment.Direction.X, fragment.Direction.Y)
+		if dir.X == 0 && dir.Y == 0 {
+			dir = direction{X: 1}
+		}
+		childMass := fragment.Mass / 2
+		fragment.Mass = childMass
+		fragment.Radius = massToRadius(fragment.Mass)
+		fragment.MergeReadyAt = now.Add(dividerMergeDelay)
+		fragment.CooldownUntil = now.Add(dividerSplitCooldown)
+
+		child := &player{
+			ID:           randomID(),
+			SessionID:    "",
+			OwnerID:      ownerID,
+			Nickname:     fragment.Nickname,
+			CellType:     fragment.CellType,
+			Ability:      fragment.Ability,
+			X:            clamp(fragment.X-dir.X*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
+			Y:            clamp(fragment.Y-dir.Y*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
+			Mass:         childMass,
+			Radius:       massToRadius(childMass),
+			Scale:        1,
+			Color:        fragment.Color,
+			IsBot:        fragment.IsBot,
+			Direction:    fragment.Direction,
+			CooldownUntil: now.Add(dividerSplitCooldown),
+			MergeReadyAt: now.Add(dividerMergeDelay),
+			LastSeen:     fragment.LastSeen,
+			NextBotThinkAt: fragment.NextBotThinkAt,
+		}
+
+		fragment.X = clamp(fragment.X+dir.X*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius)
+		fragment.Y = clamp(fragment.Y+dir.Y*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius)
+		plans = append(plans, splitPlan{parent: fragment, child: child})
+		remainingSlots--
+	}
+
+	for _, plan := range plans {
+		s.players[plan.child.ID] = plan.child
+	}
 }
 
 func maxDuration(a, b time.Duration) time.Duration {
@@ -1079,6 +1550,59 @@ func (s *gameState) pullNearbyFoodLocked(p *player, radius float64) {
 	}
 }
 
+func (s *gameState) applyWormholeForceLocked(p *player, now time.Time) {
+	for _, hole := range s.wormholes {
+		if hole.Kind != "blackhole" {
+			continue
+		}
+
+		dist := distance(p.X, p.Y, hole.X, hole.Y)
+		if dist > hole.PullRange {
+			continue
+		}
+
+		if dist > 0.001 {
+			pull := clamp(1-(dist/hole.PullRange), 0, 1)
+			dirX := (hole.X - p.X) / dist
+			dirY := (hole.Y - p.Y) / dist
+			p.X = clamp(p.X+dirX*(22+pull*34)/tickRate, currentRadius(p), worldSize-currentRadius(p))
+			p.Y = clamp(p.Y+dirY*(22+pull*34)/tickRate, currentRadius(p), worldSize-currentRadius(p))
+		}
+
+		if now.Before(p.PortalUntil) || dist > hole.Radius*0.72 {
+			continue
+		}
+
+		exit := s.pairedWormholeLocked(hole)
+		if exit == nil {
+			continue
+		}
+
+		offset := normalizeDirection(p.Direction.X, p.Direction.Y)
+		if offset.X == 0 && offset.Y == 0 {
+			offset = normalizeDirection(exit.X-hole.X, exit.Y-hole.Y)
+		}
+		if offset.X == 0 && offset.Y == 0 {
+			offset = direction{X: 1}
+		}
+
+		spawnDistance := exit.Radius + currentRadius(p) + 24
+		p.X = clamp(exit.X+offset.X*spawnDistance, currentRadius(p), worldSize-currentRadius(p))
+		p.Y = clamp(exit.Y+offset.Y*spawnDistance, currentRadius(p), worldSize-currentRadius(p))
+		p.PortalUntil = now.Add(1500 * time.Millisecond)
+		return
+	}
+}
+
+func (s *gameState) pairedWormholeLocked(entry *wormhole) *wormhole {
+	for _, hole := range s.wormholes {
+		if hole.PairID == entry.PairID && hole.ID != entry.ID && hole.Kind == "whitehole" {
+			return hole
+		}
+	}
+	return nil
+}
+
 func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 	if now.Before(p.CactusUntil) {
 		return
@@ -1099,7 +1623,7 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 		p.CactusUntil = now.Add(1500 * time.Millisecond)
 
 		if p.Mass >= 120 {
-			s.burstPlayerFromCactusLocked(p, dir)
+			s.forceSplitFromCactusLocked(p, dir)
 		} else {
 			escape := currentRadius(p) + cactusRadius + 10
 			p.X = clamp(c.X+dir.X*escape, currentRadius(p), worldSize-currentRadius(p))
@@ -1109,27 +1633,34 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 	}
 }
 
-func (s *gameState) burstPlayerFromCactusLocked(p *player, dir direction) {
-	loss := math.Min(p.Mass*0.34, 380)
-	p.Mass = math.Max(playerStartMass, p.Mass-loss)
+func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction) {
+	loss := math.Min(p.Mass*0.48, 520)
+	remainingMass := math.Max(playerStartMass, p.Mass-loss)
+	splitMass := p.Mass - remainingMass
+	p.Mass = remainingMass
 	p.Radius = massToRadius(p.Mass)
 
-	pellets := 6
-	perPellet := loss * 0.8 / float64(pellets)
-	for i := 0; i < pellets; i += 1 {
-		angle := math.Atan2(dir.Y, dir.X) + (float64(i)-float64(pellets-1)/2)*0.32
-		chunkRadius := math.Max(8, math.Sqrt(perPellet)*1.15)
+	chunks := 6
+	perChunk := splitMass * 0.88 / float64(chunks)
+	baseAngle := math.Atan2(dir.Y, dir.X)
+	for i := 0; i < chunks; i += 1 {
+		angle := baseAngle + (float64(i)-float64(chunks-1)/2)*0.34
+		chunkRadius := math.Max(11, math.Sqrt(perChunk)*1.3)
 		chunk := &food{
 			ID:     randomID(),
-			X:      clamp(p.X+math.Cos(angle)*(p.Radius+chunkRadius+12), chunkRadius, worldSize-chunkRadius),
-			Y:      clamp(p.Y+math.Sin(angle)*(p.Radius+chunkRadius+12), chunkRadius, worldSize-chunkRadius),
+			X:      clamp(p.X+math.Cos(angle)*(p.Radius+chunkRadius+18), chunkRadius, worldSize-chunkRadius),
+			Y:      clamp(p.Y+math.Sin(angle)*(p.Radius+chunkRadius+18), chunkRadius, worldSize-chunkRadius),
 			Radius: chunkRadius,
-			Value:  perPellet,
-			VX:     math.Cos(angle) * 420,
-			VY:     math.Sin(angle) * 420,
+			Value:  perChunk,
+			VX:     math.Cos(angle) * 520,
+			VY:     math.Sin(angle) * 520,
 		}
 		s.foods = append(s.foods, chunk)
 	}
+
+	recoil := 42.0
+	p.X = clamp(p.X-dir.X*recoil, currentRadius(p), worldSize-currentRadius(p))
+	p.Y = clamp(p.Y-dir.Y*recoil, currentRadius(p), worldSize-currentRadius(p))
 }
 
 func (s *gameState) reconcileBotsLocked() {
@@ -1168,9 +1699,11 @@ func newBotPlayer(index int) *player {
 	cellType := randomBotCellType()
 	now := time.Now()
 	mass := playerStartMass + mathrand.Float64()*18
+	id := randomID()
 	return &player{
-		ID:            randomID(),
+		ID:            id,
 		SessionID:     "",
+		OwnerID:       id,
 		Nickname:      randomBotNickname(index),
 		CellType:      cellType,
 		Ability:       abilityName(cellType),
@@ -1187,7 +1720,7 @@ func newBotPlayer(index int) *player {
 }
 
 func randomBotCellType() string {
-	cellTypes := []string{"classic", "blink", "giant", "shield", "magnet"}
+	cellTypes := []string{"classic", "blink", "giant", "shield", "magnet", "divider"}
 	return cellTypes[mathrand.Intn(len(cellTypes))]
 }
 
@@ -1224,7 +1757,7 @@ func (s *gameState) updateBotLocked(p *player, now time.Time) {
 		}
 	case smallerTarget != nil && distance(p.X, p.Y, smallerTarget.X, smallerTarget.Y) < 320:
 		p.Direction = normalizeDirection(smallerTarget.X-p.X, smallerTarget.Y-p.Y)
-		if p.CellType == "giant" && p.Mass > smallerTarget.Mass*1.12 {
+		if (p.CellType == "giant" && p.Mass > smallerTarget.Mass*1.12) || (p.CellType == "divider" && p.Mass > dividerMinSplitMass*1.2) {
 			s.tryUseAbility(p)
 		}
 	case nearestFood != nil:

@@ -24,7 +24,7 @@
         <h2>조작 안내</h2>
         <div class="help-line"><span>이동</span><strong>마우스 방향 추적</strong></div>
         <div class="help-line"><span>전용기</span><strong>Space</strong></div>
-        <div class="help-line"><span>공통 분열</span><strong>W</strong></div>
+        <div class="help-line"><span>공통 배출</span><strong>W</strong></div>
         <div class="help-line"><span>규칙</span><strong>작은 세포만 포식</strong></div>
       </section>
     </div>
@@ -52,9 +52,22 @@
     </div>
   </div>
 
-  <div id="leaderboard" class="leaderboard hidden"></div>
+  <div id="leaderboard" class="leaderboard hidden">
+    <button id="leaderboardToggle" class="panel-toggle" type="button" aria-expanded="true">순위 접기</button>
+    <div id="leaderboardContent"></div>
+  </div>
   <div id="minimap" class="minimap hidden">
+    <button id="minimapToggle" class="minimap-toggle" type="button" aria-expanded="true">지도 접기</button>
     <canvas id="minimapCanvas" width="180" height="180"></canvas>
+  </div>
+  <div id="touchControls" class="touch-controls hidden">
+    <div id="touchPad" class="touch-pad">
+      <div id="touchStick" class="touch-stick"></div>
+    </div>
+    <div class="touch-actions">
+      <button id="touchAbility" class="touch-button ability" type="button">스킬</button>
+      <button id="touchSplit" class="touch-button split" type="button">분열</button>
+    </div>
   </div>
   <div id="message" class="message hidden"></div>
 

@@ -166,6 +166,10 @@
           <input id="minimumPlayers" type="number" min="0" step="1">
         </label>
         <label>
+          바이러스 수
+          <input id="cactusCount" type="number" min="0" step="1">
+        </label>
+        <label>
           블랙홀/화이트홀 세트 수
           <input id="wormholePairs" type="number" min="0" step="1">
         </label>
@@ -195,6 +199,7 @@
     const botCount = document.getElementById("botCount");
     const totalCount = document.getElementById("totalCount");
     const minimumPlayers = document.getElementById("minimumPlayers");
+    const cactusCount = document.getElementById("cactusCount");
     const wormholePairs = document.getElementById("wormholePairs");
     const baseSpeed = document.getElementById("baseSpeed");
     const speedDivisor = document.getElementById("speedDivisor");
@@ -203,7 +208,7 @@
     const configForm = document.getElementById("configForm");
     const refreshButton = document.getElementById("refreshButton");
 
-    const inputs = [minimumPlayers, wormholePairs, baseSpeed, speedDivisor, minimumSpeed];
+    const inputs = [minimumPlayers, cactusCount, wormholePairs, baseSpeed, speedDivisor, minimumSpeed];
     let isDirty = false;
     let isSaving = false;
 
@@ -214,6 +219,7 @@
 
     function applyConfig(config) {
       minimumPlayers.value = config.minimumPlayers;
+      cactusCount.value = config.cactusCount;
       wormholePairs.value = config.wormholePairs;
       baseSpeed.value = config.baseSpeed;
       speedDivisor.value = config.speedDivisor;
@@ -265,6 +271,7 @@
       try {
         const payload = {
           minimumPlayers: Number(minimumPlayers.value),
+          cactusCount: Number(cactusCount.value),
           wormholePairs: Number(wormholePairs.value),
           baseSpeed: Number(baseSpeed.value),
           speedDivisor: Number(speedDivisor.value),

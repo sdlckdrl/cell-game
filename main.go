@@ -69,6 +69,7 @@ type gameState struct {
 
 type runtimeConfig struct {
 	MinimumPlayers int     `json:"minimumPlayers"`
+	CactusCount    int     `json:"cactusCount"`
 	WormholePairs  int     `json:"wormholePairs"`
 	BaseSpeed      float64 `json:"baseSpeed"`
 	SpeedDivisor   float64 `json:"speedDivisor"`
@@ -195,6 +196,7 @@ type adminStatusResponse struct {
 
 type adminConfigRequest struct {
 	MinimumPlayers *int     `json:"minimumPlayers"`
+	CactusCount    *int     `json:"cactusCount"`
 	WormholePairs  *int     `json:"wormholePairs"`
 	BaseSpeed      *float64 `json:"baseSpeed"`
 	SpeedDivisor   *float64 `json:"speedDivisor"`
@@ -262,6 +264,7 @@ func main() {
 		chats:     make([]chatEntry, 0, 20),
 		config: runtimeConfig{
 			MinimumPlayers: defaultMinimumPlayers,
+			CactusCount:    cactusTarget,
 			WormholePairs:  defaultWormholePairs,
 			BaseSpeed:      defaultBaseSpeed,
 			SpeedDivisor:   defaultSpeedDivisor,
@@ -368,15 +371,21 @@ func (s *gameState) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	humans := 0
-	bots := 0
+	humanOwners := make(map[string]struct{})
+	botOwners := make(map[string]struct{})
 	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
 		if p.IsBot {
-			bots++
+			botOwners[ownerID] = struct{}{}
 		} else {
-			humans++
+			humanOwners[ownerID] = struct{}{}
 		}
 	}
+	humans := len(humanOwners)
+	bots := len(botOwners)
 	config := s.config
 	s.mu.RUnlock()
 
@@ -407,6 +416,9 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.MinimumPlayers != nil {
 		s.config.MinimumPlayers = int(math.Max(0, float64(*req.MinimumPlayers)))
 	}
+	if req.CactusCount != nil {
+		s.config.CactusCount = int(math.Max(0, float64(*req.CactusCount)))
+	}
 	if req.WormholePairs != nil {
 		s.config.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
 	}
@@ -419,6 +431,7 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.MinimumSpeed != nil {
 		s.config.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
 	}
+	s.reconcileCactiLocked()
 	s.reconcileWormholesLocked()
 	s.reconcileBotsLocked()
 	config := s.config
@@ -1011,6 +1024,21 @@ func (s *gameState) seedFoods() {
 
 func (s *gameState) seedCacti() {
 	for len(s.cacti) < cactusTarget {
+		s.cacti = append(s.cacti, createCactus())
+	}
+}
+
+func (s *gameState) reconcileCactiLocked() {
+	target := s.config.CactusCount
+	if target < 0 {
+		target = 0
+	}
+
+	for len(s.cacti) > target {
+		s.cacti[len(s.cacti)-1] = nil
+		s.cacti = s.cacti[:len(s.cacti)-1]
+	}
+	for len(s.cacti) < target {
 		s.cacti = append(s.cacti, createCactus())
 	}
 }

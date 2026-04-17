@@ -158,6 +158,7 @@ canvas.addEventListener("wheel", (event) => {
 }, { passive: false });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
+    state.lastSnapshotAt = performance.now(); // 탭에 복귀할 때 타이머를 초기화하여 억울한 튕김 방지
     ensureSocketConnection();
   }
 });
@@ -339,7 +340,7 @@ function loop(timestamp) {
   state.lastFrame = timestamp;
   state.time = timestamp * 0.001;
 
-  if (state.connected && state.lastSnapshotAt > 0 && timestamp - state.lastSnapshotAt > 7000) {
+  if (!document.hidden && state.connected && state.lastSnapshotAt > 0 && timestamp - state.lastSnapshotAt > 7000) {
     forceReconnect();
   }
 

@@ -23,17 +23,17 @@ import (
 )
 
 const (
-	port            = "8000"
-	worldSize       = 3600.0
-	foodTarget      = 320
-	cactusTarget    = 28
-	defaultWormholePairs = 3
-	playerStartMass = 36.0
-	tickRate        = 30
-	playerTimeout   = 60 * time.Second
-	playerCullRange = 1280.0
-	foodCullRange   = 1460.0
-	objectCullRange = 1600.0
+	port                  = "8000"
+	worldSize             = 3600.0
+	foodTarget            = 320
+	cactusTarget          = 28
+	defaultWormholePairs  = 3
+	playerStartMass       = 36.0
+	tickRate              = 30
+	playerTimeout         = 30 * time.Second
+	playerCullRange       = 1280.0
+	foodCullRange         = 1460.0
+	objectCullRange       = 1600.0
 	defaultMinimumPlayers = 20
 	defaultBaseSpeed      = 285.0
 	defaultSpeedDivisor   = 8.5
@@ -42,6 +42,11 @@ const (
 	dividerMergeDelay     = 7 * time.Second
 	dividerMinSplitMass   = 40.0
 	dividerMaxFragments   = 16
+
+	// 공간 분할(Spatial Partitioning) 관련 상수
+	spatialCellSize = 500.0
+	spatialGridCols = (int(worldSize) / int(spatialCellSize)) + 1
+	spatialGridRows = spatialGridCols
 )
 
 var mimeTypes = map[string]string{
@@ -69,30 +74,30 @@ type runtimeConfig struct {
 }
 
 type player struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"-"`
-	OwnerID   string    `json:"ownerId"`
-	Nickname  string    `json:"nickname"`
-	CellType  string    `json:"cellType"`
-	Ability   string    `json:"abilityName"`
-	X         float64   `json:"x"`
-	Y         float64   `json:"y"`
-	Mass      float64   `json:"mass"`
-	Radius    float64   `json:"radius"`
-	Scale     float64   `json:"scale"`
-	Color     string    `json:"color"`
-	IsBot     bool      `json:"isBot"`
-	Direction direction `json:"-"`
-	CooldownRemaining      int64     `json:"cooldownRemaining"`
-	EffectRemaining        int64     `json:"effectRemaining"`
-	CooldownUntil          time.Time `json:"-"`
-	EffectUntil            time.Time `json:"-"`
-	CactusUntil            time.Time `json:"-"`
-	PortalUntil            time.Time `json:"-"`
-	MergeReadyAt           time.Time `json:"-"`
-	LastSeen               time.Time `json:"-"`
-	NextBotThinkAt         time.Time `json:"-"`
-	Conn                   *wsConn   `json:"-"`
+	ID                string    `json:"id"`
+	SessionID         string    `json:"-"`
+	OwnerID           string    `json:"ownerId"`
+	Nickname          string    `json:"nickname"`
+	CellType          string    `json:"cellType"`
+	Ability           string    `json:"abilityName"`
+	X                 float64   `json:"x"`
+	Y                 float64   `json:"y"`
+	Mass              float64   `json:"mass"`
+	Radius            float64   `json:"radius"`
+	Scale             float64   `json:"scale"`
+	Color             string    `json:"color"`
+	IsBot             bool      `json:"isBot"`
+	Direction         direction `json:"-"`
+	CooldownRemaining int64     `json:"cooldownRemaining"`
+	EffectRemaining   int64     `json:"effectRemaining"`
+	CooldownUntil     time.Time `json:"-"`
+	EffectUntil       time.Time `json:"-"`
+	CactusUntil       time.Time `json:"-"`
+	PortalUntil       time.Time `json:"-"`
+	MergeReadyAt      time.Time `json:"-"`
+	LastSeen          time.Time `json:"-"`
+	NextBotThinkAt    time.Time `json:"-"`
+	Conn              *wsConn   `json:"-"`
 }
 
 type direction struct {
@@ -186,6 +191,51 @@ type adminConfigRequest struct {
 type wsConn struct {
 	conn net.Conn
 	mu   sync.Mutex
+}
+
+// ----------------------------------------------------
+// 공간 분할(Spatial Partitioning) 헬퍼 구조체 및 함수
+// ----------------------------------------------------
+
+type spatialGrid struct {
+	players   [][][]*player
+	foods     [][][]*food
+	cacti     [][][]*cactus
+	wormholes [][][]*wormhole
+}
+
+func newSpatialGrid() *spatialGrid {
+	g := &spatialGrid{
+		players:   make([][][]*player, spatialGridCols),
+		foods:     make([][][]*food, spatialGridCols),
+		cacti:     make([][][]*cactus, spatialGridCols),
+		wormholes: make([][][]*wormhole, spatialGridCols),
+	}
+	for i := 0; i < spatialGridCols; i++ {
+		g.players[i] = make([][]*player, spatialGridRows)
+		g.foods[i] = make([][]*food, spatialGridRows)
+		g.cacti[i] = make([][]*cactus, spatialGridRows)
+		g.wormholes[i] = make([][]*wormhole, spatialGridRows)
+	}
+	return g
+}
+
+func getCellIndex(x, y float64) (int, int) {
+	cx := int(x / spatialCellSize)
+	cy := int(y / spatialCellSize)
+	if cx < 0 {
+		cx = 0
+	}
+	if cy < 0 {
+		cy = 0
+	}
+	if cx >= spatialGridCols {
+		cx = spatialGridCols - 1
+	}
+	if cy >= spatialGridRows {
+		cy = spatialGridRows - 1
+	}
+	return cx, cy
 }
 
 func main() {
@@ -557,7 +607,11 @@ func (s *gameState) updateWorld() {
 			if distance(p.X, p.Y, f.X, f.Y) < effectiveRadius+f.Radius {
 				p.Mass += f.Value
 				p.Radius = massToRadius(p.Mass)
-				s.foods = append(s.foods[:i], s.foods[i+1:]...)
+
+				// [Memory Leak Fix]: 요소를 삭제할 때 끝부분의 포인터를 nil로 명시적 해제
+				s.foods[i] = s.foods[len(s.foods)-1]
+				s.foods[len(s.foods)-1] = nil
+				s.foods = s.foods[:len(s.foods)-1]
 			}
 		}
 	}
@@ -575,61 +629,226 @@ func (s *gameState) resolvePlayerEating() {
 		players = append(players, p)
 	}
 
+	now := time.Now() // 현재 시간 한 번만 호출
+
 	for i := 0; i < len(players); i++ {
 		for j := i + 1; j < len(players); j++ {
 			a := players[i]
 			b := players[j]
+
+			// 이미 먹혔거나 제거된 플레이어인지 확인
 			if _, ok := s.players[a.ID]; !ok {
 				continue
 			}
 			if _, ok := s.players[b.ID]; !ok {
 				continue
 			}
+
+			// 같은 소유주의 조각끼리는 먹지 않음
 			if a.OwnerID != "" && a.OwnerID == b.OwnerID {
 				continue
 			}
 
 			gap := distance(a.X, a.Y, b.X, b.Y)
+
 			if canEatPlayer(a, b, gap) {
+				// A가 B를 포식
 				a.Mass += b.Mass * 0.85
 				a.Radius = massToRadius(a.Mass)
 				s.handleConsumedPlayerLocked(b)
 			} else if canEatPlayer(b, a, gap) {
+				// B가 A를 포식
 				b.Mass += a.Mass * 0.85
 				b.Radius = massToRadius(b.Mass)
 				s.handleConsumedPlayerLocked(a)
+			} else {
+				// 포식 관계가 성립하지 않을 때 (비슷한 크기이거나, 무적 상태 등)
+
+				// 추가된 조건: 둘 중 하나라도 방어 관련 스킬(실드, 자이언트)이 켜져 있을 때만 밀어내기
+				aHasShield := a.CellType == "shield" && now.Before(a.EffectUntil)
+				bHasShield := b.CellType == "shield" && now.Before(b.EffectUntil)
+				aIsGiant := a.CellType == "giant" && now.Before(a.EffectUntil)
+				bIsGiant := b.CellType == "giant" && now.Before(b.EffectUntil)
+
+				if aHasShield || bHasShield || aIsGiant || bIsGiant {
+					radiusA := currentRadius(a)
+					radiusB := currentRadius(b)
+					minGap := radiusA + radiusB
+
+					if gap < minGap && gap > 0 {
+						overlap := minGap - gap
+
+						// 질량 합산 및 밀려나는 비율 계산 (가벼울수록 더 많이 밀려남)
+						totalMass := a.Mass + b.Mass
+						if totalMass <= 0 {
+							totalMass = 1
+						}
+
+						pushA := (b.Mass / totalMass) * overlap * 0.5
+						pushB := (a.Mass / totalMass) * overlap * 0.5
+
+						dirX := (a.X - b.X) / gap
+						dirY := (a.Y - b.Y) / gap
+
+						// A 이동 및 월드 경계 클램핑
+						a.X = clamp(a.X+dirX*pushA, radiusA, worldSize-radiusA)
+						a.Y = clamp(a.Y+dirY*pushA, radiusA, worldSize-radiusA)
+
+						// B 이동 및 월드 경계 클램핑
+						b.X = clamp(b.X-dirX*pushB, radiusB, worldSize-radiusB)
+						b.Y = clamp(b.Y-dirY*pushB, radiusB, worldSize-radiusB)
+					}
+				}
 			}
 		}
 	}
 }
 
+// ----------------------------------------------------
+// 최적화된 브로드캐스트 함수 (Spatial Partitioning)
+// ----------------------------------------------------
 func (s *gameState) broadcastSnapshot() {
 	s.mu.RLock()
-	type snapshotTarget struct {
-		playerID string
-		conn     *wsConn
-	}
-	targets := make([]snapshotTarget, 0, len(s.players))
+
+	// 1. O(N²) 방지를 위한 공간 분할(Grid) 캐시 구축
+	grid := newSpatialGrid()
 	for _, p := range s.players {
-		if p.Conn != nil {
+		cx, cy := getCellIndex(p.X, p.Y)
+		grid.players[cx][cy] = append(grid.players[cx][cy], p)
+	}
+	for _, f := range s.foods {
+		cx, cy := getCellIndex(f.X, f.Y)
+		grid.foods[cx][cy] = append(grid.foods[cx][cy], f)
+	}
+	for _, c := range s.cacti {
+		cx, cy := getCellIndex(c.X, c.Y)
+		grid.cacti[cx][cy] = append(grid.cacti[cx][cy], c)
+	}
+	for _, w := range s.wormholes {
+		cx, cy := getCellIndex(w.X, w.Y)
+		grid.wormholes[cx][cy] = append(grid.wormholes[cx][cy], w)
+	}
+
+	leaderboard := buildOwnerLeaderboard(s.players)
+
+	// 2. 소유자(Owner)별 중심점 사전 계산 (루프 내 중복 연산 방지)
+	type centerMass struct {
+		x, y, totalMass float64
+	}
+	centers := make(map[string]*centerMass)
+	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		if centers[ownerID] == nil {
+			centers[ownerID] = &centerMass{}
+		}
+		centers[ownerID].x += p.X * p.Mass
+		centers[ownerID].y += p.Y * p.Mass
+		centers[ownerID].totalMass += p.Mass
+	}
+	for _, c := range centers {
+		if c.totalMass > 0 {
+			c.x /= c.totalMass
+			c.y /= c.totalMass
+		}
+	}
+
+	type snapshotTarget struct {
+		conn    *wsConn
+		payload []byte
+	}
+	var targets []snapshotTarget
+
+	// 3. 접속 중인 유저별로 타겟 페이로드 생성
+	for _, viewer := range s.players {
+		if viewer.Conn == nil {
+			continue
+		}
+
+		viewerOwnerID := viewer.OwnerID
+		if viewerOwnerID == "" {
+			viewerOwnerID = viewer.ID
+		}
+
+		// 캐싱된 중심점 가져오기
+		var centerX, centerY float64
+		if c, ok := centers[viewerOwnerID]; ok && c.totalMass > 0 {
+			centerX = c.x
+			centerY = c.y
+		} else {
+			centerX = viewer.X
+			centerY = viewer.Y
+		}
+
+		// 조회할 Grid의 최소/최대 인덱스 도출
+		minCx, minCy := getCellIndex(centerX-objectCullRange, centerY-objectCullRange)
+		maxCx, maxCy := getCellIndex(centerX+objectCullRange, centerY+objectCullRange)
+
+		var players []*player
+		var foods []*food
+		var cacti []*cactus
+		var wormholes []*wormhole
+
+		// 4. 전체 순회 대신 인접 격자(Grid)만 순회하여 성능 극대화
+		for cx := minCx; cx <= maxCx; cx++ {
+			for cy := minCy; cy <= maxCy; cy++ {
+				for _, p := range grid.players[cx][cy] {
+					targetOwnerID := p.OwnerID
+					if targetOwnerID == "" {
+						targetOwnerID = p.ID
+					}
+					if targetOwnerID != viewerOwnerID && !isWithinCullRange(centerX, centerY, p.X, p.Y, playerCullRange+currentRadius(p)) {
+						continue
+					}
+					players = append(players, clonePlayer(p))
+				}
+				for _, f := range grid.foods[cx][cy] {
+					if !isWithinCullRange(centerX, centerY, f.X, f.Y, foodCullRange+f.Radius) {
+						continue
+					}
+					copyFood := *f
+					foods = append(foods, &copyFood)
+				}
+				for _, c := range grid.cacti[cx][cy] {
+					if !isWithinCullRange(centerX, centerY, c.X, c.Y, objectCullRange+c.Size*1.3) {
+						continue
+					}
+					copyCactus := *c
+					cacti = append(cacti, &copyCactus)
+				}
+				for _, w := range grid.wormholes[cx][cy] {
+					if !isWithinCullRange(centerX, centerY, w.X, w.Y, objectCullRange+w.PullRange) {
+						continue
+					}
+					copyHole := *w
+					wormholes = append(wormholes, &copyHole)
+				}
+			}
+		}
+
+		payload, err := json.Marshal(snapshotMessage{
+			Type:        "snapshot",
+			Players:     players,
+			Foods:       foods,
+			Cacti:       cacti,
+			Wormholes:   wormholes,
+			Leaderboard: leaderboard,
+		})
+
+		if err == nil {
 			targets = append(targets, snapshotTarget{
-				playerID: p.ID,
-				conn:     p.Conn,
+				conn:    viewer.Conn,
+				payload: payload,
 			})
 		}
 	}
-	s.mu.RUnlock()
+	s.mu.RUnlock() // JSON 생성 후 ReadLock 조기 해제
 
-	if len(targets) == 0 {
-		return
-	}
-
+	// 5. 실제 웹소켓 전송 (락 해제 상태에서 수행)
 	for _, target := range targets {
-		payload, err := s.buildSnapshotPayload(target.playerID)
-		if err != nil {
-			continue
-		}
-		if err := target.conn.writeText(payload); err != nil {
+		if err := target.conn.writeText(target.payload); err != nil {
 			target.conn.close()
 		}
 	}
@@ -643,6 +862,7 @@ func (s *gameState) sendSnapshotTo(playerID string, conn *wsConn) error {
 	return conn.writeText(payload)
 }
 
+// 최초 1회 Join 시 호출되는 단일 페이로드 생성 로직 (기존 로직 유지)
 func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 	s.mu.RLock()
 	viewer, ok := s.players[playerID]
@@ -727,6 +947,9 @@ func (s *gameState) reconcileWormholesLocked() {
 
 	targetCount := targetPairs * 2
 	for len(s.wormholes) > targetCount {
+		// [Memory Leak Fix]
+		s.wormholes[len(s.wormholes)-1] = nil
+		s.wormholes[len(s.wormholes)-2] = nil
 		s.wormholes = s.wormholes[:len(s.wormholes)-2]
 	}
 
@@ -1160,30 +1383,6 @@ func (s *gameState) mergeOwnedPairLocked(ownerID string, a, b *player) {
 	delete(s.players, source.ID)
 }
 
-func (s *gameState) cloneCacti() []*cactus {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make([]*cactus, len(s.cacti))
-	for i, c := range s.cacti {
-		copyCactus := *c
-		out[i] = &copyCactus
-	}
-	return out
-}
-
-func (s *gameState) cloneWormholes() []*wormhole {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make([]*wormhole, len(s.wormholes))
-	for i, hole := range s.wormholes {
-		copyHole := *hole
-		out[i] = &copyHole
-	}
-	return out
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1461,23 +1660,23 @@ func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
 		fragment.CooldownUntil = now.Add(dividerSplitCooldown)
 
 		child := &player{
-			ID:           randomID(),
-			SessionID:    "",
-			OwnerID:      ownerID,
-			Nickname:     fragment.Nickname,
-			CellType:     fragment.CellType,
-			Ability:      fragment.Ability,
-			X:            clamp(fragment.X-dir.X*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
-			Y:            clamp(fragment.Y-dir.Y*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
-			Mass:         childMass,
-			Radius:       massToRadius(childMass),
-			Scale:        1,
-			Color:        fragment.Color,
-			IsBot:        fragment.IsBot,
-			Direction:    fragment.Direction,
-			CooldownUntil: now.Add(dividerSplitCooldown),
-			MergeReadyAt: now.Add(dividerMergeDelay),
-			LastSeen:     fragment.LastSeen,
+			ID:             randomID(),
+			SessionID:      "",
+			OwnerID:        ownerID,
+			Nickname:       fragment.Nickname,
+			CellType:       fragment.CellType,
+			Ability:        fragment.Ability,
+			X:              clamp(fragment.X-dir.X*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
+			Y:              clamp(fragment.Y-dir.Y*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius),
+			Mass:           childMass,
+			Radius:         massToRadius(childMass),
+			Scale:          1,
+			Color:          fragment.Color,
+			IsBot:          fragment.IsBot,
+			Direction:      fragment.Direction,
+			CooldownUntil:  now.Add(dividerSplitCooldown),
+			MergeReadyAt:   now.Add(dividerMergeDelay),
+			LastSeen:       fragment.LastSeen,
 			NextBotThinkAt: fragment.NextBotThinkAt,
 		}
 
@@ -1685,6 +1884,9 @@ func (s *gameState) reconcileBotsLocked() {
 		if bot.Conn != nil {
 			bot.Conn.close()
 		}
+
+		// [Memory Leak Fix]
+		bots[len(bots)-1] = nil
 		bots = bots[:len(bots)-1]
 	}
 
@@ -1701,20 +1903,20 @@ func newBotPlayer(index int) *player {
 	mass := playerStartMass + mathrand.Float64()*18
 	id := randomID()
 	return &player{
-		ID:            id,
-		SessionID:     "",
-		OwnerID:       id,
-		Nickname:      randomBotNickname(index),
-		CellType:      cellType,
-		Ability:       abilityName(cellType),
-		X:             400 + mathrand.Float64()*(worldSize-800),
-		Y:             400 + mathrand.Float64()*(worldSize-800),
-		Mass:          mass,
-		Radius:        massToRadius(mass),
-		Scale:         1,
-		Color:         randomColor(),
-		IsBot:         true,
-		LastSeen:      now,
+		ID:             id,
+		SessionID:      "",
+		OwnerID:        id,
+		Nickname:       randomBotNickname(index),
+		CellType:       cellType,
+		Ability:        abilityName(cellType),
+		X:              400 + mathrand.Float64()*(worldSize-800),
+		Y:              400 + mathrand.Float64()*(worldSize-800),
+		Mass:           mass,
+		Radius:         massToRadius(mass),
+		Scale:          1,
+		Color:          randomColor(),
+		IsBot:          true,
+		LastSeen:       now,
 		NextBotThinkAt: now,
 	}
 }

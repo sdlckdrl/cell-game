@@ -30,7 +30,7 @@ const (
 	defaultWormholePairs  = 3
 	playerStartMass       = 36.0
 	tickRate              = 30
-	playerTimeout         = 30 * time.Second
+	playerTimeout         = 60 * time.Second
 	playerCullRange       = 1280.0
 	foodCullRange         = 1460.0
 	objectCullRange       = 1600.0
@@ -57,12 +57,13 @@ var mimeTypes = map[string]string{
 }
 
 type gameState struct {
-	mu        sync.RWMutex
-	players   map[string]*player
-	foods     []*food
-	cacti     []*cactus
-	wormholes []*wormhole
-	config    runtimeConfig
+	mu           sync.RWMutex
+	players      map[string]*player
+	foods        []*food
+	cacti        []*cactus
+	wormholes    []*wormhole
+	config       runtimeConfig
+	spatialCache *spatialGrid
 }
 
 type runtimeConfig struct {
@@ -253,6 +254,7 @@ func main() {
 			SpeedDivisor:   defaultSpeedDivisor,
 			MinimumSpeed:   defaultMinimumSpeed,
 		},
+		spatialCache: newSpatialGrid(),
 	}
 	state.seedFoods()
 	state.seedCacti()
@@ -711,7 +713,15 @@ func (s *gameState) broadcastSnapshot() {
 	s.mu.RLock()
 
 	// 1. O(N²) 방지를 위한 공간 분할(Grid) 캐시 구축
-	grid := newSpatialGrid()
+	grid := s.spatialCache
+	for cx := 0; cx < spatialGridCols; cx++ {
+		for cy := 0; cy < spatialGridRows; cy++ {
+			grid.players[cx][cy] = grid.players[cx][cy][:0]
+			grid.foods[cx][cy] = grid.foods[cx][cy][:0]
+			grid.cacti[cx][cy] = grid.cacti[cx][cy][:0]
+			grid.wormholes[cx][cy] = grid.wormholes[cx][cy][:0]
+		}
+	}
 	for _, p := range s.players {
 		cx, cy := getCellIndex(p.X, p.Y)
 		grid.players[cx][cy] = append(grid.players[cx][cy], p)
@@ -757,7 +767,7 @@ func (s *gameState) broadcastSnapshot() {
 
 	type snapshotTarget struct {
 		conn    *wsConn
-		payload []byte
+		message snapshotMessage
 	}
 	var targets []snapshotTarget
 
@@ -828,27 +838,27 @@ func (s *gameState) broadcastSnapshot() {
 			}
 		}
 
-		payload, err := json.Marshal(snapshotMessage{
-			Type:        "snapshot",
-			Players:     players,
-			Foods:       foods,
-			Cacti:       cacti,
-			Wormholes:   wormholes,
-			Leaderboard: leaderboard,
+		targets = append(targets, snapshotTarget{
+			conn: viewer.Conn,
+			message: snapshotMessage{
+				Type:        "snapshot",
+				Players:     players,
+				Foods:       foods,
+				Cacti:       cacti,
+				Wormholes:   wormholes,
+				Leaderboard: leaderboard,
+			},
 		})
-
-		if err == nil {
-			targets = append(targets, snapshotTarget{
-				conn:    viewer.Conn,
-				payload: payload,
-			})
-		}
 	}
 	s.mu.RUnlock() // JSON 생성 후 ReadLock 조기 해제
 
 	// 5. 실제 웹소켓 전송 (락 해제 상태에서 수행)
 	for _, target := range targets {
-		if err := target.conn.writeText(target.payload); err != nil {
+		payload, err := json.Marshal(target.message)
+		if err != nil {
+			continue
+		}
+		if err := target.conn.writeText(payload); err != nil {
 			target.conn.close()
 		}
 	}

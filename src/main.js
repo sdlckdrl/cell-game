@@ -31,12 +31,12 @@ const hudEffectFill = document.getElementById("hudEffectFill");
 
 const CELL_TYPES = {
   classic: {
-    name: "기본 세포",
-    abilityName: "질주",
-    description: "짧은 시간 빠르게 치고 빠집니다. 가장 다루기 쉬운 기본형입니다.",
-    detail: "4초 쿨타임 / 1.2초 가속",
+    name: "오버클럭",
+    abilityName: "코어 가속",
+    description: "스페이스바를 누르는 동안 에너지를 소모해 지속적으로 가속합니다. 사용을 멈추면 에너지가 서서히 자동 충전됩니다.",
+    detail: "최대 1.5초 가속 / 4초 완충",
     cooldownMs: 4000,
-    effectMs: 1200,
+    effectMs: 1500,
   },
   blink: {
     name: "블링크 세포",
@@ -136,11 +136,18 @@ if (state.isTouchDevice) {
 
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Space" && !event.repeat) {
+  if (event.code === "Space") { // 꾹 누를 때 연속 입력 허용
     state.abilityPressed = true;
   }
   if (event.code === "KeyW" && !event.repeat) {
     state.splitPressed = true;
+  }
+});
+
+// ✅ 새로 추가: 키를 뗄 때 가속 중지
+window.addEventListener("keyup", (event) => {
+  if (event.code === "Space") {
+    state.abilityPressed = false;
   }
 });
 canvas.addEventListener("mousemove", (event) => {
@@ -175,6 +182,20 @@ window.addEventListener("pointercancel", onTouchPadEnd);
 touchAbility.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   state.abilityPressed = true;
+});
+
+// ✅ 새로 추가: 손가락을 떼거나 빗나갔을 때
+touchAbility.addEventListener("pointerup", (event) => {
+  event.preventDefault();
+  state.abilityPressed = false;
+});
+touchAbility.addEventListener("pointerleave", (event) => {
+  event.preventDefault();
+  state.abilityPressed = false;
+});
+touchAbility.addEventListener("pointercancel", (event) => {
+  event.preventDefault();
+  state.abilityPressed = false;
 });
 touchSplit.addEventListener("pointerdown", (event) => {
   event.preventDefault();
@@ -331,7 +352,6 @@ function sendInput() {
     useAbility: state.abilityPressed,
     useSplit: state.splitPressed,
   }));
-  state.abilityPressed = false;
   state.splitPressed = false;
 }
 

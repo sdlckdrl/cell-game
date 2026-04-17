@@ -99,6 +99,8 @@ type player struct {
 	LastSeen          time.Time `json:"-"`
 	NextBotThinkAt    time.Time `json:"-"`
 	Conn              *wsConn   `json:"-"`
+	IsAbilityActive   bool      `json:"-"` // ✅ 추가: 현재 스킬 버튼 누름 여부
+	Energy            float64   `json:"-"` // ✅ 추가: 오버클럭 에너지 (0 ~ 4000)
 }
 
 type direction struct {
@@ -306,7 +308,7 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Color:     randomColor(),
 		LastSeen:  time.Now(),
 	}
-
+	p.Energy = 4000
 	s.mu.Lock()
 	s.players[playerID] = p
 	s.reconcileBotsLocked()
@@ -524,6 +526,7 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 				fragment.Direction.X = clamp(msg.Direction.X, -1, 1)
 				fragment.Direction.Y = clamp(msg.Direction.Y, -1, 1)
 				fragment.LastSeen = now
+				fragment.IsAbilityActive = msg.UseAbility
 			}
 			if msg.UseAbility {
 				s.tryUseAbility(p)
@@ -589,9 +592,26 @@ func (s *gameState) updateWorld() {
 		case p.CellType == "giant" && now.Before(p.EffectUntil):
 			speed *= 0.68
 			p.Scale = 1.9
-		case p.CellType == "classic" && now.Before(p.EffectUntil):
-			speed *= 1.9
+		case p.CellType == "classic": // ✅ 오버클럭 에너지 제어 로직
 			p.Scale = 1
+			depleteRate := 4000.0 / (1.5 * tickRate)  // 1.5초 만에 방전
+			rechargeRate := 4000.0 / (4.0 * tickRate) // 4초 만에 완충
+
+			if p.IsAbilityActive {
+				if p.Energy > 0 {
+					p.Energy -= depleteRate
+					speed *= 1.9
+					p.EffectUntil = now.Add(150 * time.Millisecond) // UI 점등용
+				}
+				if p.Energy < 0 {
+					p.Energy = 0
+				}
+			} else {
+				p.Energy += rechargeRate
+				if p.Energy > 4000 {
+					p.Energy = 4000
+				}
+			}
 		default:
 			p.Scale = 1
 		}
@@ -1111,6 +1131,7 @@ func respawnPlayer(p *player) {
 	if ownerID == "" {
 		ownerID = p.ID
 	}
+	p.Energy = 4000
 	p.Mass = playerStartMass
 	p.Radius = massToRadius(playerStartMass)
 	p.X = 400 + mathrand.Float64()*(worldSize-800)
@@ -1127,11 +1148,24 @@ func respawnPlayer(p *player) {
 
 func clonePlayer(p *player) *player {
 	now := time.Now()
-	cooldownRemaining := maxDuration(0, p.CooldownUntil.Sub(now))
-	effectRemaining := maxDuration(0, p.EffectUntil.Sub(now))
+
+	// 1. 밀리초(ms) 단위로 변환한 값을 먼저 변수에 담습니다.
+	cooldownRemainingMs := int64(maxDuration(0, p.CooldownUntil.Sub(now)) / time.Millisecond)
+	effectRemainingMs := int64(maxDuration(0, p.EffectUntil.Sub(now)) / time.Millisecond)
+
+	// ✅ 2. 오버클럭(classic)일 경우, 에너지를 쿨타임 수치로 변환합니다.
+	// 에너지가 4000(완충)이면 쿨타임 0(준비 완료).
+	// 에너지가 0(방전)이면 쿨타임 4000(재충전 중)으로 프론트엔드에 전달합니다.
+	if p.CellType == "classic" {
+		cooldownRemainingMs = int64(4000 - p.Energy)
+		if cooldownRemainingMs < 0 {
+			cooldownRemainingMs = 0
+		}
+	}
+
 	return &player{
 		ID:                p.ID,
-		OwnerID:           p.OwnerID,
+		OwnerID:           p.OwnerID, // 이전에 GetOwnerID()로 통합하셨다면 p.GetOwnerID() 사용
 		Nickname:          p.Nickname,
 		CellType:          p.CellType,
 		Ability:           p.Ability,
@@ -1142,8 +1176,8 @@ func clonePlayer(p *player) *player {
 		Scale:             p.Scale,
 		Color:             p.Color,
 		IsBot:             p.IsBot,
-		CooldownRemaining: int64(cooldownRemaining / time.Millisecond),
-		EffectRemaining:   int64(effectRemaining / time.Millisecond),
+		CooldownRemaining: cooldownRemainingMs, // ✅ 수정된 변수 적용
+		EffectRemaining:   effectRemainingMs,   // ✅ 수정된 변수 적용
 	}
 }
 
@@ -1261,6 +1295,11 @@ func buildOwnerLeaderboard(players map[string]*player) []ownerSummary {
 		out = append(out, *entry)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		// ✅ 추가된 부분: 질량이 소수점까지 완전히 똑같을 경우 닉네임/ID 순으로 고정시켜 깜빡임 방지
+		if out[i].Mass == out[j].Mass {
+			return out[i].OwnerID < out[j].OwnerID
+		}
+		// 기존 정렬 조건
 		return out[i].Mass > out[j].Mass
 	})
 	return out
@@ -1525,7 +1564,7 @@ func sanitizeCellType(value string) string {
 func abilityName(cellType string) string {
 	switch cellType {
 	case "classic":
-		return "질주"
+		return "코어 가속"
 	case "blink":
 		return "순간이동"
 	case "giant":
@@ -1579,9 +1618,6 @@ func (s *gameState) tryUseAbility(p *player) {
 	}
 
 	switch p.CellType {
-	case "classic":
-		p.EffectUntil = now.Add(1200 * time.Millisecond)
-		p.CooldownUntil = now.Add(4 * time.Second)
 	case "blink":
 		blinkDistance := 180.0
 		length := math.Hypot(p.Direction.X, p.Direction.Y)
@@ -1688,6 +1724,7 @@ func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
 			MergeReadyAt:   now.Add(dividerMergeDelay),
 			LastSeen:       fragment.LastSeen,
 			NextBotThinkAt: fragment.NextBotThinkAt,
+			Energy:         fragment.Energy,
 		}
 
 		fragment.X = clamp(fragment.X+dir.X*(fragment.Radius+28), fragment.Radius, worldSize-fragment.Radius)
@@ -1873,37 +1910,63 @@ func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction) {
 }
 
 func (s *gameState) reconcileBotsLocked() {
-	humans := 0
-	bots := make([]*player, 0)
+	humanOwners := make(map[string]bool)
+	botOwners := make(map[string]bool)
+	var botMains []*player
+
+	// 1. 조각이 아닌 '고유 소유자(본체)' 기준으로 인원수 계산
 	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+
 		if p.IsBot {
-			bots = append(bots, p)
+			if !botOwners[ownerID] {
+				botOwners[ownerID] = true
+				botMains = append(botMains, p) // 삭제 기준이 될 대표 봇 1개만 수집
+			}
 		} else {
-			humans++
+			humanOwners[ownerID] = true
 		}
 	}
 
+	humans := len(humanOwners)
 	requiredBots := s.config.MinimumPlayers - humans
 	if requiredBots < 0 {
 		requiredBots = 0
 	}
 
-	for len(bots) > requiredBots {
-		bot := bots[len(bots)-1]
-		delete(s.players, bot.ID)
-		if bot.Conn != nil {
-			bot.Conn.close()
+	// 2. 봇이 너무 많으면 고유 봇 기준으로 그 봇의 '모든 조각'을 깔끔하게 삭제
+	for len(botMains) > requiredBots {
+		botToRemove := botMains[len(botMains)-1]
+		removeOwnerID := botToRemove.OwnerID
+		if removeOwnerID == "" {
+			removeOwnerID = botToRemove.ID
 		}
 
-		// [Memory Leak Fix]
-		bots[len(bots)-1] = nil
-		bots = bots[:len(bots)-1]
+		for id, p := range s.players {
+			pOwner := p.OwnerID
+			if pOwner == "" {
+				pOwner = p.ID
+			}
+			if pOwner == removeOwnerID {
+				if p.Conn != nil {
+					p.Conn.close()
+				}
+				delete(s.players, id)
+			}
+		}
+
+		botMains[len(botMains)-1] = nil
+		botMains = botMains[:len(botMains)-1]
 	}
 
-	for len(bots) < requiredBots {
-		bot := newBotPlayer(len(bots) + 1)
+	// 3. 부족한 봇 보충
+	for len(botMains) < requiredBots {
+		bot := newBotPlayer(len(botMains) + 1)
 		s.players[bot.ID] = bot
-		bots = append(bots, bot)
+		botMains = append(botMains, bot)
 	}
 }
 
@@ -1928,6 +1991,7 @@ func newBotPlayer(index int) *player {
 		IsBot:          true,
 		LastSeen:       now,
 		NextBotThinkAt: now,
+		Energy:         4000,
 	}
 }
 
@@ -1964,7 +2028,7 @@ func (s *gameState) updateBotLocked(p *player, now time.Time) {
 	switch {
 	case largerThreat != nil && distance(p.X, p.Y, largerThreat.X, largerThreat.Y) < 260:
 		p.Direction = normalizeDirection(p.X-largerThreat.X, p.Y-largerThreat.Y)
-		if p.CellType == "blink" || p.CellType == "shield" || p.CellType == "classic" {
+		if p.CellType == "blink" || p.CellType == "shield" {
 			s.tryUseAbility(p)
 		}
 	case smallerTarget != nil && distance(p.X, p.Y, smallerTarget.X, smallerTarget.Y) < 320:
@@ -1979,6 +2043,15 @@ func (s *gameState) updateBotLocked(p *player, now time.Time) {
 		}
 	default:
 		p.Direction = normalizeDirection(mathrand.Float64()*2-1, mathrand.Float64()*2-1)
+	}
+	if p.CellType == "classic" {
+		shouldDash := false
+		if largerThreat != nil && distance(p.X, p.Y, largerThreat.X, largerThreat.Y) < 300 {
+			shouldDash = true
+		} else if smallerTarget != nil && distance(p.X, p.Y, smallerTarget.X, smallerTarget.Y) < 350 {
+			shouldDash = true
+		}
+		p.IsAbilityActive = shouldDash // 위협이나 타겟이 있을 때만 가속 버튼 누르기
 	}
 }
 

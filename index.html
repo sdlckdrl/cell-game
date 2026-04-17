@@ -1,0 +1,63 @@
+﻿<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>세포 키우기 멀티플레이</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="loginScreen" class="screen">
+    <div class="panel">
+      <p class="eyebrow">Simple Multiplayer Cell Game</p>
+      <h1>세포 키우기</h1>
+      <p class="description">닉네임과 세포 타입을 고르고 입장하세요. 세포마다 고유 능력이 있고, 능력 사용은 서버가 쿨타임을 판정합니다.</p>
+      <form id="loginForm" class="login-form">
+        <input id="nicknameInput" type="text" maxlength="16" placeholder="닉네임 입력" autocomplete="off" required>
+        <button type="submit">시작</button>
+      </form>
+      <section class="class-picker">
+        <h2>세포 선택</h2>
+        <div id="cellOptions" class="cell-options"></div>
+      </section>
+      <section class="help-panel">
+        <h2>조작 안내</h2>
+        <div class="help-line"><span>이동</span><strong>마우스 방향 추적</strong></div>
+        <div class="help-line"><span>전용기</span><strong>Space</strong></div>
+        <div class="help-line"><span>공통 분열</span><strong>W</strong></div>
+        <div class="help-line"><span>규칙</span><strong>작은 세포만 포식</strong></div>
+      </section>
+    </div>
+  </div>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <div id="hud" class="hud hidden">
+    <div class="hud-card">
+      <div class="hud-line"><span>닉네임</span><strong id="hudName">-</strong></div>
+      <div class="hud-line"><span>세포</span><strong id="hudCellType">-</strong></div>
+      <div class="hud-line"><span>질량</span><strong id="hudMass">0</strong></div>
+      <div class="hud-line"><span>순위</span><strong id="hudRank">-</strong></div>
+    </div>
+    <div class="hud-card">
+      <div class="hud-line"><span>전용기</span><strong id="hudAbilityName">-</strong></div>
+      <div class="meter-block">
+        <div class="hud-line"><span>전용기 쿨</span><strong id="hudCooldownLabel">준비</strong></div>
+        <div class="meter"><div id="hudCooldownFill" class="meter-fill"></div></div>
+      </div>
+      <div class="meter-block">
+        <div class="hud-line"><span>효과 지속</span><strong id="hudEffectLabel">없음</strong></div>
+        <div class="meter effect"><div id="hudEffectFill" class="meter-fill"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="leaderboard" class="leaderboard hidden"></div>
+  <div id="minimap" class="minimap hidden">
+    <canvas id="minimapCanvas" width="180" height="180"></canvas>
+  </div>
+  <div id="message" class="message hidden"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

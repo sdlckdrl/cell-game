@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Super Admin</title>
+  <style>
+    :root {
+      --bg: #08111f;
+      --panel: rgba(11, 19, 35, 0.82);
+      --line: rgba(167, 212, 255, 0.16);
+      --text: #eef7ff;
+      --muted: #98afc7;
+      --accent: #8affcf;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top, rgba(88, 180, 255, 0.14), transparent 25%),
+        radial-gradient(circle at bottom, rgba(99, 255, 199, 0.1), transparent 30%),
+        var(--bg);
+      padding: 28px;
+    }
+
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 22px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(14px);
+    }
+
+    h1, h2, p { margin: 0; }
+
+    .eyebrow {
+      color: var(--accent);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 0.72rem;
+      margin-bottom: 8px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(255,255,255,0.03);
+    }
+
+    .stat strong {
+      display: block;
+      margin-top: 8px;
+      font-size: 1.8rem;
+    }
+
+    form {
+      display: grid;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+    }
+
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+    }
+
+    button {
+      width: fit-content;
+      padding: 12px 18px;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #8affcf, #60b9ff);
+      color: #04111d;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .status {
+      margin-top: 10px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 16px; }
+      .stats { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="panel">
+      <p class="eyebrow">Super Admin</p>
+      <h1>서버 제어판</h1>
+      <p class="status">현재 접속 인원과 런타임 값을 실시간으로 조정할 수 있습니다.</p>
+      <div class="stats">
+        <div class="stat">
+          <span>실유저</span>
+          <strong id="humanCount">0</strong>
+        </div>
+        <div class="stat">
+          <span>가상 인원</span>
+          <strong id="botCount">0</strong>
+        </div>
+        <div class="stat">
+          <span>총 인원</span>
+          <strong id="totalCount">0</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>런타임 설정</h2>
+      <form id="configForm">
+        <label>
+          최소 총 인원수
+          <input id="minimumPlayers" type="number" min="0" step="1">
+        </label>
+        <label>
+          기본 속도 계수
+          <input id="baseSpeed" type="number" min="10" step="1">
+        </label>
+        <label>
+          감속 분모
+          <input id="speedDivisor" type="number" min="1" step="0.1">
+        </label>
+        <label>
+          최소 속도 바닥값
+          <input id="minimumSpeed" type="number" min="1" step="1">
+        </label>
+        <button type="submit">설정 저장</button>
+      </form>
+      <p id="saveStatus" class="status">서버 상태를 불러오는 중입니다.</p>
+    </section>
+  </main>
+
+  <script>
+    const humanCount = document.getElementById("humanCount");
+    const botCount = document.getElementById("botCount");
+    const totalCount = document.getElementById("totalCount");
+    const minimumPlayers = document.getElementById("minimumPlayers");
+    const baseSpeed = document.getElementById("baseSpeed");
+    const speedDivisor = document.getElementById("speedDivisor");
+    const minimumSpeed = document.getElementById("minimumSpeed");
+    const saveStatus = document.getElementById("saveStatus");
+    const configForm = document.getElementById("configForm");
+
+    async function loadStatus() {
+      try {
+        const response = await fetch("/api/admin/status");
+        if (!response.ok) throw new Error("status failed");
+        const data = await response.json();
+        humanCount.textContent = data.humanPlayers;
+        botCount.textContent = data.botPlayers;
+        totalCount.textContent = data.totalPlayers;
+        minimumPlayers.value = data.config.minimumPlayers;
+        baseSpeed.value = data.config.baseSpeed;
+        speedDivisor.value = data.config.speedDivisor;
+        minimumSpeed.value = data.config.minimumSpeed;
+        saveStatus.textContent = "서버와 동기화되었습니다.";
+      } catch {
+        saveStatus.textContent = "상태를 불러오지 못했습니다.";
+      }
+    }
+
+    configForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      saveStatus.textContent = "저장 중입니다...";
+      try {
+        const response = await fetch("/api/admin/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            minimumPlayers: Number(minimumPlayers.value),
+            baseSpeed: Number(baseSpeed.value),
+            speedDivisor: Number(speedDivisor.value),
+            minimumSpeed: Number(minimumSpeed.value),
+          }),
+        });
+        if (!response.ok) throw new Error("save failed");
+        saveStatus.textContent = "설정을 저장했습니다.";
+        loadStatus();
+      } catch {
+        saveStatus.textContent = "설정 저장에 실패했습니다.";
+      }
+    });
+
+    loadStatus();
+    setInterval(loadStatus, 2000);
+  </script>
+</body>
+</html>

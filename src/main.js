@@ -24,6 +24,9 @@ const touchPad = document.getElementById("touchPad");
 const touchStick = document.getElementById("touchStick");
 const touchAbility = document.getElementById("touchAbility");
 const touchSplit = document.getElementById("touchSplit");
+const fullscreenPrompt = document.getElementById("fullscreenPrompt");
+const fullscreenAccept = document.getElementById("fullscreenAccept");
+const fullscreenDismiss = document.getElementById("fullscreenDismiss");
 const messageBox = document.getElementById("message");
 const hudName = document.getElementById("hudName");
 const hudCellType = document.getElementById("hudCellType");
@@ -91,7 +94,7 @@ const world = {
   height: 3600,
 };
 
-const MINIMAP_RANGE = 900;
+const FULLSCREEN_PROMPT_KEY = "cellgame-mobile-fullscreen-prompt";
 
 const state = {
   playerId: null,
@@ -125,8 +128,9 @@ const state = {
   time: 0,
   leaderboardCollapsed: false,
   minimapCollapsed: false,
-  chatCollapsed: false,
+  chatCollapsed: true,
   chatLastActivityAt: 0,
+  chatPreviewUntil: 0,
   isTouchDevice: matchMedia("(pointer: coarse)").matches || "ontouchstart" in window,
   touch: {
     active: false,
@@ -146,6 +150,8 @@ function isTypingInField() {
 
 if (state.isTouchDevice) {
   document.body.classList.add("touch-device");
+  state.leaderboardCollapsed = true;
+  maybeShowFullscreenPrompt();
 }
 
 window.addEventListener("resize", resizeCanvas);
@@ -161,6 +167,9 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "Enter" && state.connected) {
     event.preventDefault();
+    if (state.chatCollapsed) {
+      setChatCollapsed(false);
+    }
     chatInput.focus();
   }
 });
@@ -226,6 +235,18 @@ touchSplit.addEventListener("pointerdown", (event) => {
   state.splitPressed = true;
 });
 touchSplit.textContent = "W";
+fullscreenAccept.addEventListener("click", async () => {
+  localStorage.setItem(FULLSCREEN_PROMPT_KEY, "accepted");
+  hideFullscreenPrompt();
+  const entered = await requestMobileFullscreen();
+  if (!entered) {
+    showMessage("브라우저에서 전체화면 전환이 제한되었습니다.");
+  }
+});
+fullscreenDismiss.addEventListener("click", () => {
+  localStorage.setItem(FULLSCREEN_PROMPT_KEY, "dismissed");
+  hideFullscreenPrompt();
+});
 minimapToggle.addEventListener("click", () => {
   state.minimapCollapsed = !state.minimapCollapsed;
   minimap.classList.toggle("collapsed", state.minimapCollapsed);
@@ -239,13 +260,7 @@ leaderboardToggle.addEventListener("click", () => {
   leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
 });
 chatToggle.addEventListener("click", () => {
-  state.chatCollapsed = !state.chatCollapsed;
-  chatPanel.classList.toggle("collapsed", state.chatCollapsed);
-  chatToggle.textContent = state.chatCollapsed ? "채팅 열기" : "채팅 접기";
-  chatToggle.setAttribute("aria-expanded", String(!state.chatCollapsed));
-  if (!state.chatCollapsed) {
-    markChatActivity();
-  }
+  setChatCollapsed(!state.chatCollapsed);
 });
 
 chatForm.addEventListener("submit", (event) => {
@@ -333,17 +348,10 @@ function connectSocket() {
       }
       state.lastSnapshotAt = snapshotAt;
       state.players = data.players;
+      applyRuntimeConfig(data.config);
       state.leaderboard = data.leaderboard || [];
       const nextChats = data.chats || [];
-      if (nextChats.length !== state.chats.length) {
-        markChatActivity();
-      } else if (nextChats.length > 0) {
-        const prevLast = state.chats[state.chats.length - 1];
-        const nextLast = nextChats[nextChats.length - 1];
-        if (!prevLast || !nextLast || prevLast.id !== nextLast.id) {
-          markChatActivity();
-        }
-      }
+      handleIncomingChats(nextChats);
       state.chats = nextChats;
       state.foods = data.foods;
       state.cacti = data.cacti || [];
@@ -530,12 +538,12 @@ function stepRenderPlayers(dt, timestamp) {
 }
 
 function updateCamera() {
-  const center = getOwnedCenterFromRenderPlayers();
-  if (!center) {
+  const metrics = getOwnedMetricsFromRenderPlayers();
+  if (!metrics) {
     return;
   }
-  state.camera.x = lerp(state.camera.x, center.x, 0.16);
-  state.camera.y = lerp(state.camera.y, center.y, 0.16);
+  state.camera.x = lerp(state.camera.x, metrics.x, 0.16);
+  state.camera.y = lerp(state.camera.y, metrics.y, 0.16);
 }
 
 function render() {
@@ -579,11 +587,149 @@ function drawFoods() {
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
   for (const food of state.foods) {
+    if (food.kind === "probiotic" || food.kind === "probiotic-growth" || food.kind === "probiotic-speed" || food.kind === "probiotic-shield") {
+      const pulse = 1 + Math.sin(state.time * 3.4 + food.x * 0.01) * 0.08;
+      const radius = food.radius * pulse;
+      const palette = getBeneficialFoodPalette(food.kind);
+      const gradient = ctx.createRadialGradient(
+        food.x - radius * 0.25,
+        food.y - radius * 0.3,
+        radius * 0.15,
+        food.x,
+        food.y,
+        radius * 1.15,
+      );
+      gradient.addColorStop(0, palette.core);
+      gradient.addColorStop(0.4, palette.mid);
+      gradient.addColorStop(1, palette.outer);
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(food.x, food.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = palette.ring;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.strokeStyle = palette.halo;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(food.x, food.y, radius + 4 + Math.sin(state.time * 2.2 + food.y * 0.01) * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+
+      drawBeneficialFoodIcon(food, radius, palette);
+      continue;
+    }
+
     ctx.fillStyle = "#8affcf";
     ctx.beginPath();
     ctx.arc(food.x, food.y, food.radius, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
+}
+
+function getBeneficialFoodPalette(kind) {
+  switch (kind) {
+    case "probiotic-speed":
+      return {
+        core: "#eefbff",
+        mid: "#7ce7ff",
+        outer: "#2aa7e3",
+        ring: "rgba(214,247,255,0.92)",
+        halo: "rgba(124,231,255,0.34)",
+        icon: "rgba(233,250,255,0.96)",
+        iconFill: "rgba(233,250,255,0.9)",
+      };
+    case "probiotic-shield":
+      return {
+        core: "#fff7db",
+        mid: "#ffd86a",
+        outer: "#ff9b2f",
+        ring: "rgba(255,244,209,0.95)",
+        halo: "rgba(255,204,92,0.34)",
+        icon: "rgba(255,248,227,0.96)",
+        iconFill: "rgba(255,238,184,0.88)",
+      };
+    default:
+      return {
+        core: "#f9fff3",
+        mid: "#b9ff84",
+        outer: "#4fcf62",
+        ring: "rgba(240,255,220,0.9)",
+        halo: "rgba(185,255,132,0.35)",
+        icon: "rgba(243,255,232,0.95)",
+        iconFill: "rgba(227,255,202,0.9)",
+      };
+  }
+}
+
+function drawBeneficialFoodIcon(food, radius, palette) {
+  ctx.save();
+  ctx.translate(food.x, food.y);
+  ctx.strokeStyle = palette.icon;
+  ctx.fillStyle = palette.iconFill;
+  ctx.lineWidth = Math.max(1.8, radius * 0.14);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  if (food.kind === "probiotic-speed") {
+    ctx.rotate(Math.sin(state.time * 2.6 + food.x * 0.01) * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(-radius * 0.28, -radius * 0.16);
+    ctx.lineTo(radius * 0.02, -radius * 0.16);
+    ctx.lineTo(-radius * 0.08, radius * 0.22);
+    ctx.lineTo(radius * 0.3, radius * 0.02);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(-radius * 0.18, radius * 0.12, radius * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(radius * 0.04, radius * 0.06, radius * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(radius * 0.22, -radius * 0.02, radius * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  if (food.kind === "probiotic-shield") {
+    ctx.beginPath();
+    ctx.moveTo(0, -radius * 0.34);
+    ctx.bezierCurveTo(radius * 0.28, -radius * 0.3, radius * 0.38, -radius * 0.04, radius * 0.28, radius * 0.24);
+    ctx.bezierCurveTo(radius * 0.18, radius * 0.44, radius * 0.02, radius * 0.54, 0, radius * 0.58);
+    ctx.bezierCurveTo(-radius * 0.02, radius * 0.54, -radius * 0.18, radius * 0.44, -radius * 0.28, radius * 0.24);
+    ctx.bezierCurveTo(-radius * 0.38, -radius * 0.04, -radius * 0.28, -radius * 0.3, 0, -radius * 0.34);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, -radius * 0.18);
+    ctx.lineTo(0, radius * 0.28);
+    ctx.moveTo(-radius * 0.18, 0);
+    ctx.lineTo(radius * 0.18, 0);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  ctx.rotate(Math.sin(state.time * 1.8 + food.y * 0.01) * 0.12);
+  for (let i = 0; i < 6; i += 1) {
+    const angle = (Math.PI * 2 * i) / 6;
+    const x = Math.cos(angle) * radius * 0.3;
+    const y = Math.sin(angle) * radius * 0.3;
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 0.11, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -741,10 +887,15 @@ function drawPlayers() {
     const isSameOwner = me && (me.ownerId || me.id) === (player.ownerId || player.id);
     const canEat = me && !isSameOwner && me.id !== player.id && me.mass > player.mass * 1.1;
     const canBeEaten = me && !isSameOwner && me.id !== player.id && player.mass > me.mass * 1.1;
+    const deformation = getFragmentDeformation(player);
 
     ctx.fillStyle = player.color;
+    ctx.save();
+    ctx.translate(player.drawX, player.drawY);
+    ctx.rotate(deformation.angle);
+    ctx.scale(deformation.scaleX, deformation.scaleY);
     ctx.beginPath();
-    ctx.arc(player.drawX, player.drawY, player.drawRadius, 0, Math.PI * 2);
+    ctx.arc(0, 0, player.drawRadius, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.strokeStyle = isMe
@@ -756,8 +907,9 @@ function drawPlayers() {
           : canBeEaten
             ? "rgba(255,139,157,0.85)"
             : "rgba(255,255,255,0.35)";
-    ctx.lineWidth = isMe ? 3 : isSameOwner ? 2.4 : 1.5;
+    ctx.lineWidth = (isMe ? 3 : isSameOwner ? 2.4 : 1.5) / Math.max(0.78, deformation.scaleX);
     ctx.stroke();
+    ctx.restore();
 
     if (player.effectRemaining > 0) {
       ctx.strokeStyle = "rgba(255, 205, 112, 0.9)";
@@ -768,18 +920,84 @@ function drawPlayers() {
     }
 
     ctx.fillStyle = "#eef7ff";
-    const nameFontSize = Math.max(11, Math.min(18, player.drawRadius * 0.38));
-    const massFontSize = Math.max(10, Math.min(15, player.drawRadius * 0.28));
+    const nameFontSize = Math.max(12, Math.min(player.drawRadius * 0.72, player.drawRadius * (player.nickname.length <= 4 ? 0.82 : 0.66)));
+    const massFontSize = Math.max(10, Math.min(player.drawRadius * 0.34, 28));
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = `700 ${nameFontSize}px Segoe UI`;
-    ctx.fillText(player.nickname, player.drawX, player.drawY - Math.min(8, player.drawRadius * 0.16));
+    ctx.fillText(player.nickname, player.drawX, player.drawY - Math.min(10, player.drawRadius * 0.14));
     ctx.font = `${massFontSize}px Segoe UI`;
     ctx.fillStyle = "rgba(238,247,255,0.82)";
-    ctx.fillText(String(Math.round(player.mass)), player.drawX, player.drawY + Math.min(12, player.drawRadius * 0.2));
+    ctx.fillText(String(Math.round(player.mass)), player.drawX, player.drawY + Math.min(16, player.drawRadius * 0.22));
   }
 
   ctx.restore();
+}
+
+function getFragmentDeformation(player) {
+  const ownerId = player.ownerId || player.id;
+  let nearest = null;
+  let nearestDistance = Infinity;
+  const velocityX = player.velocityX || 0;
+  const velocityY = player.velocityY || 0;
+  const speed = Math.hypot(velocityX, velocityY);
+  const moveAngle = speed > 0.001 ? Math.atan2(velocityY, velocityX) : 0;
+  const slimeWave = Math.sin(state.time * 7.2 + player.drawX * 0.01 + player.drawY * 0.013);
+  const speedStretch = clamp01(speed / 260) * 0.08;
+  const idlePulse = 0.012 + clamp01(speed / 320) * 0.016;
+
+  for (const other of state.renderPlayers.values()) {
+    if (other.id === player.id || (other.ownerId || other.id) !== ownerId) {
+      continue;
+    }
+    const dist = Math.hypot(other.drawX - player.drawX, other.drawY - player.drawY);
+    if (dist < nearestDistance) {
+      nearestDistance = dist;
+      nearest = other;
+    }
+  }
+
+  if (!nearest) {
+    const wobble = slimeWave * idlePulse;
+    return {
+      scaleX: 1 + speedStretch + wobble,
+      scaleY: 1 - speedStretch * 0.68 - wobble * 0.55,
+      angle: moveAngle,
+    };
+  }
+
+  const combinedRadius = player.drawRadius + nearest.drawRadius;
+  const squishStart = combinedRadius * 1.2;
+  if (nearestDistance >= squishStart) {
+    const wobble = slimeWave * idlePulse;
+    return {
+      scaleX: 1 + speedStretch + wobble,
+      scaleY: 1 - speedStretch * 0.68 - wobble * 0.55,
+      angle: moveAngle,
+    };
+  }
+
+  const proximity = clamp01(1 - nearestDistance / squishStart);
+  const amount = proximity * 0.14;
+  const wobble = slimeWave * (idlePulse + proximity * 0.015);
+  const baseAngle = Math.atan2(nearest.drawY - player.drawY, nearest.drawX - player.drawX);
+  const angleBlend = proximity * 0.72;
+  const angle = speed > 0.001
+    ? lerpAngle(moveAngle, baseAngle, angleBlend)
+    : baseAngle;
+
+  return {
+    scaleX: 1 + amount + speedStretch + wobble,
+    scaleY: 1 - amount * 0.72 - speedStretch * 0.58 - wobble * 0.6,
+    angle,
+  };
+}
+
+function lerpAngle(start, end, alpha) {
+  let diff = end - start;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return start + diff * alpha;
 }
 
 function renderLeaderboard() {
@@ -799,9 +1017,12 @@ function renderLeaderboard() {
 }
 
 function renderChat() {
+  const now = performance.now();
+  const previewActive = state.chatCollapsed && state.chatPreviewUntil > now;
   const idleSeconds = (performance.now() - state.chatLastActivityAt) / 1000;
+  chatPanel.classList.toggle("preview", previewActive);
   chatPanel.classList.toggle("faded", !state.chatCollapsed && state.chats.length > 0 && idleSeconds > 4);
-  const items = state.chats.slice(-12);
+  const items = state.chats.slice(previewActive ? -3 : -12);
   if (items.length === 0) {
     chatMessages.innerHTML = `<div class="chat-entry"><div class="chat-text">아직 채팅이 없습니다.</div></div>`;
     return;
@@ -821,10 +1042,91 @@ function markChatActivity() {
   chatPanel.classList.remove("faded");
 }
 
+function setChatCollapsed(collapsed) {
+  state.chatCollapsed = collapsed;
+  if (!collapsed) {
+    state.chatPreviewUntil = 0;
+    markChatActivity();
+  }
+  chatPanel.classList.toggle("collapsed", collapsed);
+  chatPanel.classList.toggle("preview", false);
+  chatToggle.textContent = collapsed ? "채팅 열기" : "채팅 접기";
+  chatToggle.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function handleIncomingChats(nextChats) {
+  let hasNewChat = nextChats.length !== state.chats.length;
+  if (!hasNewChat && nextChats.length > 0) {
+    const prevLast = state.chats[state.chats.length - 1];
+    const nextLast = nextChats[nextChats.length - 1];
+    hasNewChat = !prevLast || !nextLast || prevLast.id !== nextLast.id;
+  }
+  if (!hasNewChat) {
+    return;
+  }
+
+  markChatActivity();
+  const nextLast = nextChats[nextChats.length - 1];
+  if (state.chatCollapsed && nextLast && !isOwnChatEntry(nextLast)) {
+    state.chatPreviewUntil = performance.now() + 4200;
+  }
+}
+
+function isOwnChatEntry(entry) {
+  return !!entry && entry.nickname === state.nickname && !entry.isBot;
+}
+
 function showMessage(text) {
   messageBox.textContent = text;
   messageBox.classList.remove("hidden");
   state.messageTimer = 2.2;
+}
+
+function maybeShowFullscreenPrompt() {
+  if (!state.isTouchDevice || !fullscreenPrompt) {
+    return;
+  }
+  const choice = localStorage.getItem(FULLSCREEN_PROMPT_KEY);
+  if (choice || isFullscreenActive()) {
+    return;
+  }
+  fullscreenPrompt.classList.remove("hidden");
+}
+
+function hideFullscreenPrompt() {
+  if (!fullscreenPrompt) {
+    return;
+  }
+  fullscreenPrompt.classList.add("hidden");
+}
+
+function isFullscreenActive() {
+  return !!(
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.msFullscreenElement
+  );
+}
+
+async function requestMobileFullscreen() {
+  const target = document.documentElement;
+  try {
+    if (target.requestFullscreen) {
+      await target.requestFullscreen({ navigationUI: "hide" });
+      return true;
+    }
+    if (target.webkitRequestFullscreen) {
+      target.webkitRequestFullscreen();
+      return true;
+    }
+    if (target.msRequestFullscreen) {
+      target.msRequestFullscreen();
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function escapeHtml(value) {
@@ -1048,28 +1350,49 @@ function getMyOwnerId() {
   return me ? (me.ownerId || me.id) : state.playerId;
 }
 
-function getOwnedCenterFromRenderPlayers() {
+function getOwnedMetricsFromRenderPlayers() {
   const ownerId = getMyOwnerId();
   let totalMass = 0;
   let x = 0;
   let y = 0;
+  let maxRadius = 0;
+  let fragmentCount = 0;
+  let largestMass = 0;
+  let focusX = 0;
+  let focusY = 0;
 
   for (const player of state.renderPlayers.values()) {
     if ((player.ownerId || player.id) !== ownerId) {
       continue;
     }
+    fragmentCount += 1;
     const mass = Math.max(1, player.mass);
     x += player.drawX * mass;
     y += player.drawY * mass;
     totalMass += mass;
+    maxRadius = Math.max(maxRadius, player.drawRadius || player.radius || 0);
+    if (mass >= largestMass) {
+      largestMass = mass;
+      focusX = player.drawX;
+      focusY = player.drawY;
+    }
   }
 
   if (totalMass <= 0) {
     return null;
   }
 
-  return { x: x / totalMass, y: y / totalMass };
+  return {
+    x: fragmentCount > 1 ? focusX : x / totalMass,
+    y: fragmentCount > 1 ? focusY : y / totalMass,
+    totalMass,
+    maxRadius,
+  };
 }
+
+leaderboard.classList.toggle("collapsed", state.leaderboardCollapsed);
+leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
+leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
 
 function getOwnedCenterFromPlayers() {
   const ownerId = getMyOwnerId();
@@ -1114,13 +1437,14 @@ function drawMinimap() {
   minimapCtx.strokeStyle = "rgba(255,255,255,0.12)";
   minimapCtx.strokeRect(0.5, 0.5, width - 1, height - 1);
 
-  const range = MINIMAP_RANGE;
   const scaleX = width / world.width;
   const scaleY = height / world.height;
+  const rangeX = canvas.width / Math.max(state.zoom, 0.01) * 0.5;
+  const rangeY = canvas.height / Math.max(state.zoom, 0.01) * 0.5;
 
   minimapCtx.strokeStyle = "rgba(138,255,207,0.18)";
-  const visionWidth = range * 2 * scaleX;
-  const visionHeight = range * 2 * scaleY;
+  const visionWidth = rangeX * 2 * scaleX;
+  const visionHeight = rangeY * 2 * scaleY;
   minimapCtx.strokeRect(
     clampRange(center.x * scaleX - visionWidth / 2, 0, width - visionWidth),
     clampRange(center.y * scaleY - visionHeight / 2, 0, height - visionHeight),
@@ -1132,7 +1456,7 @@ function drawMinimap() {
   for (const food of state.foods) {
     const dx = food.x - center.x;
     const dy = food.y - center.y;
-    if (Math.abs(dx) > range || Math.abs(dy) > range) {
+    if (Math.abs(dx) > rangeX || Math.abs(dy) > rangeY) {
       continue;
     }
     const x = food.x * scaleX;
@@ -1144,7 +1468,7 @@ function drawMinimap() {
     const isMine = (player.ownerId || player.id) === myOwnerId;
     const dx = player.x - center.x;
     const dy = player.y - center.y;
-    if (!isMine && (Math.abs(dx) > range || Math.abs(dy) > range)) {
+    if (!isMine && (Math.abs(dx) > rangeX || Math.abs(dy) > rangeY)) {
       continue;
     }
     const x = player.x * scaleX;
@@ -1177,7 +1501,32 @@ function updateZoom(timestamp) {
     state.zoomTarget = 1;
     state.zoomReturnAt = 0;
   }
-  state.zoom = lerp(state.zoom, state.zoomTarget, 0.12);
+  const autoZoom = getAutoZoom();
+  const desiredZoom = clampRange(autoZoom * state.zoomTarget, 0.1, 1.35);
+  state.zoom = lerp(state.zoom, desiredZoom, 0.12);
+}
+
+function applyRuntimeConfig(config) {
+  if (!config) {
+    return;
+  }
+  const nextWorldSize = Number(config.worldSize);
+  if (Number.isFinite(nextWorldSize) && nextWorldSize > 0) {
+    world.width = nextWorldSize;
+    world.height = nextWorldSize;
+  }
+}
+
+function getAutoZoom() {
+  const metrics = getOwnedMetricsFromRenderPlayers();
+  if (!metrics) {
+    return 1;
+  }
+
+  const dominantRadius = Math.max(24, metrics.maxRadius);
+  const desiredDiameter = 360 + dominantRadius * 9.6 + Math.sqrt(metrics.totalMass) * 16;
+  const screenSpan = Math.min(canvas.width, canvas.height);
+  return clampRange(screenSpan / desiredDiameter, 0.08, 1.05);
 }
 
 resizeCanvas();

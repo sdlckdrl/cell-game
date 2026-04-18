@@ -42,9 +42,62 @@ input {
   inset: 0;
   display: grid;
   place-items: center;
+  overflow-y: auto;
+  padding: 16px;
   z-index: 5;
   background: rgba(4, 8, 18, 0.52);
   backdrop-filter: blur(10px);
+}
+
+.fullscreen-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 8, 18, 0.42);
+  backdrop-filter: blur(8px);
+}
+
+.fullscreen-card {
+  width: min(440px, calc(100vw - 32px));
+  padding: 24px;
+  border-radius: 22px;
+  background: rgba(9, 18, 34, 0.92);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
+}
+
+.fullscreen-card h2 {
+  margin: 0 0 12px;
+  font-size: clamp(1.3rem, 4vw, 1.8rem);
+}
+
+.fullscreen-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.fullscreen-actions button {
+  flex: 1;
+  padding: 13px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  color: var(--text);
+}
+
+.fullscreen-actions .primary {
+  border: 0;
+  background: linear-gradient(135deg, #8affcf, #60b9ff);
+  color: #03101c;
+  font-weight: 700;
+}
+
+.fullscreen-actions .secondary {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .panel,
@@ -62,6 +115,10 @@ input {
   width: min(640px, calc(100vw - 32px));
   padding: 28px;
   border-radius: 24px;
+}
+
+#loginScreen .panel {
+  margin: auto 0;
 }
 
 .panel h1 {
@@ -235,20 +292,23 @@ input {
 }
 
 .leaderboard {
-  position: fixed;
-  top: 18px;
-  right: 18px;
   width: min(280px, calc(100vw - 36px));
   z-index: 3;
   display: grid;
   gap: 8px;
 }
 
-.minimap {
+.right-sidebar {
   position: fixed;
+  top: 18px;
   right: 18px;
-  bottom: 18px;
-  z-index: 6;
+  z-index: 4;
+  display: grid;
+  gap: 12px;
+  justify-items: end;
+}
+
+.minimap {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -260,8 +320,102 @@ input {
 }
 
 body.touch-device .minimap {
-  right: 18px;
-  bottom: 18px;
+  right: auto;
+  top: auto;
+}
+
+body.touch-device .hud {
+  top: 10px;
+  left: 10px;
+  gap: 0;
+}
+
+body.touch-device .hud-summary {
+  display: none;
+}
+
+body.touch-device .hud-ability {
+  min-width: 138px;
+  max-width: 156px;
+  padding: 10px 12px;
+  border-radius: 16px;
+}
+
+body.touch-device .hud-ability .hud-line {
+  gap: 8px;
+  font-size: 0.76rem;
+}
+
+body.touch-device .hud-ability .hud-line span {
+  display: none;
+}
+
+body.touch-device .hud-ability .hud-line strong {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+body.touch-device .hud-ability .meter-block + .meter-block {
+  margin-top: 8px;
+}
+
+body.touch-device .hud-ability .meter {
+  margin-top: 5px;
+  height: 7px;
+}
+
+body.touch-device .hud-ability #hudAbilityName {
+  font-size: 0.88rem;
+  letter-spacing: 0.01em;
+}
+
+body.touch-device .right-sidebar #minimap,
+body.touch-device .minimap {
+  display: none !important;
+}
+
+body.touch-device .right-sidebar {
+  top: 10px;
+  right: 10px;
+  gap: 8px;
+}
+
+body.touch-device .leaderboard {
+  width: auto;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+body.touch-device .leaderboard.collapsed {
+  padding: 8px 10px;
+}
+
+body.touch-device .chat-panel {
+  top: 10px;
+  left: 50%;
+  right: auto;
+  width: min(46vw, 280px);
+  max-width: calc(100vw - 164px);
+  transform: translateX(-50%);
+  padding: 10px 12px;
+}
+
+body.touch-device .chat-panel .chat-header {
+  gap: 10px;
+}
+
+body.touch-device .chat-panel .chat-header-actions {
+  gap: 6px;
+}
+
+body.touch-device .chat-panel #chatHint {
+  display: none;
+}
+
+body.touch-device .chat-panel.collapsed.preview {
+  width: min(58vw, 320px);
+  max-width: calc(100vw - 36px);
 }
 
 .panel-toggle,
@@ -289,7 +443,7 @@ body.touch-device .minimap {
 }
 
 body.touch-device .minimap.collapsed {
-  bottom: 232px;
+  top: auto;
 }
 
 .minimap.collapsed #minimapCanvas {
@@ -318,8 +472,9 @@ body.touch-device .minimap.collapsed {
 
 .chat-panel {
   position: fixed;
-  left: 18px;
-  bottom: 18px;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
   z-index: 4;
   width: min(360px, calc(100vw - 36px));
   display: grid;
@@ -362,7 +517,7 @@ body.touch-device .minimap.collapsed {
   border-color: transparent;
   box-shadow: none;
   backdrop-filter: none;
-  transform: translateY(6px);
+  transform: translateX(-50%) translateY(6px);
 }
 
 .chat-panel:hover,
@@ -376,6 +531,19 @@ body.touch-device .minimap.collapsed {
 
 .chat-panel.collapsed .chat-body {
   display: none;
+}
+
+.chat-panel.collapsed.preview .chat-body {
+  display: grid;
+}
+
+.chat-panel.collapsed.preview .chat-form {
+  display: none;
+}
+
+.chat-panel.collapsed.preview .chat-messages {
+  min-height: 0;
+  max-height: 110px;
 }
 
 .chat-messages {
@@ -561,13 +729,28 @@ body.touch-device .touch-controls {
     flex-direction: column;
   }
 
+  .screen {
+    place-items: start center;
+    padding: 14px;
+  }
+
+  #loginScreen .panel {
+    width: min(640px, calc(100vw - 28px));
+    margin: max(8px, env(safe-area-inset-top)) 0 calc(20px + env(safe-area-inset-bottom));
+    padding: 20px 16px;
+  }
+
   .cell-options {
     grid-template-columns: 1fr;
   }
 
   .leaderboard {
-    top: auto;
-    bottom: 220px;
+    top: 18px;
+    right: 18px;
+  }
+
+  .right-sidebar {
+    top: 18px;
     right: 18px;
   }
 
@@ -579,17 +762,26 @@ body.touch-device .touch-controls {
 
   .chat-panel {
     width: calc(100vw - 36px);
-    bottom: 18px;
+    top: 18px;
   }
 
   body.touch-device .leaderboard {
-    top: auto;
-    bottom: 220px;
-    right: 18px;
+    top: 10px;
+    right: 10px;
+  }
+
+  body.touch-device .right-sidebar {
+    top: 10px;
+    right: 10px;
   }
 
   body.touch-device .chat-panel {
-    bottom: 18px;
+    top: 10px;
+    left: 50%;
+    right: auto;
+    width: min(46vw, 280px);
+    max-width: calc(100vw - 164px);
+    transform: translateX(-50%);
   }
 
   body.touch-device .touch-controls {

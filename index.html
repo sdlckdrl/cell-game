@@ -29,17 +29,28 @@
       </section>
     </div>
   </div>
+  <div id="fullscreenPrompt" class="fullscreen-prompt hidden">
+    <div class="fullscreen-card">
+      <p class="eyebrow">Mobile View</p>
+      <h2>전체화면으로 변경하시겠습니까?</h2>
+      <p class="description">확인을 누르면 모바일에서 더 넓게 플레이할 수 있도록 전체화면을 시도합니다.</p>
+      <div class="fullscreen-actions">
+        <button id="fullscreenAccept" class="primary" type="button">확인</button>
+        <button id="fullscreenDismiss" class="secondary" type="button">닫기</button>
+      </div>
+    </div>
+  </div>
 
   <canvas id="gameCanvas"></canvas>
 
   <div id="hud" class="hud hidden">
-    <div class="hud-card">
+    <div class="hud-card hud-summary">
       <div class="hud-line"><span>닉네임</span><strong id="hudName">-</strong></div>
       <div class="hud-line"><span>세포</span><strong id="hudCellType">-</strong></div>
       <div class="hud-line"><span>질량</span><strong id="hudMass">0</strong></div>
       <div class="hud-line"><span>순위</span><strong id="hudRank">-</strong></div>
     </div>
-    <div class="hud-card">
+    <div class="hud-card hud-ability">
       <div class="hud-line"><span>전용기</span><strong id="hudAbilityName">-</strong></div>
       <div class="meter-block">
         <div class="hud-line"><span>전용기 쿨</span><strong id="hudCooldownLabel">준비</strong></div>
@@ -52,20 +63,22 @@
     </div>
   </div>
 
-  <div id="leaderboard" class="leaderboard hidden">
-    <button id="leaderboardToggle" class="panel-toggle" type="button" aria-expanded="true">순위 접기</button>
-    <div id="leaderboardContent"></div>
+  <div class="right-sidebar">
+    <div id="leaderboard" class="leaderboard hidden">
+      <button id="leaderboardToggle" class="panel-toggle" type="button" aria-expanded="true">순위 접기</button>
+      <div id="leaderboardContent"></div>
+    </div>
+    <div id="minimap" class="minimap hidden">
+      <button id="minimapToggle" class="minimap-toggle" type="button" aria-expanded="true">지도 접기</button>
+      <canvas id="minimapCanvas" width="180" height="180"></canvas>
+    </div>
   </div>
-  <div id="minimap" class="minimap hidden">
-    <button id="minimapToggle" class="minimap-toggle" type="button" aria-expanded="true">지도 접기</button>
-    <canvas id="minimapCanvas" width="180" height="180"></canvas>
-  </div>
-  <div id="chatPanel" class="chat-panel hidden">
+  <div id="chatPanel" class="chat-panel hidden collapsed">
     <div class="chat-header">
       <strong>채팅</strong>
       <div class="chat-header-actions">
         <span id="chatHint">Enter로 전송</span>
-        <button id="chatToggle" class="panel-toggle" type="button" aria-expanded="true">채팅 접기</button>
+        <button id="chatToggle" class="panel-toggle" type="button" aria-expanded="false">채팅 열기</button>
       </div>
     </div>
     <div id="chatBody" class="chat-body">

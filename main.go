@@ -24,7 +24,11 @@ import (
 
 const (
 	port                  = "8000"
-	worldSize             = 3600.0
+	configFileName        = "runtime-config.json"
+	superAdminConfigFileName = "super-admin.local.json"
+	defaultWorldSize      = 3600.0
+	maxWorldSize          = 7200.0
+	minWorldSize          = 1600.0
 	foodTarget            = 320
 	cactusTarget          = 28
 	defaultWormholePairs  = 3
@@ -38,14 +42,22 @@ const (
 	defaultBaseSpeed      = 285.0
 	defaultSpeedDivisor   = 8.5
 	defaultMinimumSpeed   = 92.0
+	probioticTarget         = 5
+	probioticSpawnEvery     = 18 * time.Second
+	probioticGrowthDuration = 32 * time.Second
+	probioticShieldDuration = 10 * time.Second
+	probioticSpeedDuration  = 18 * time.Second
+	probioticSpeedBoost     = 1.32
 	dividerSplitCooldown  = 1400 * time.Millisecond
 	dividerMergeDelay     = 7 * time.Second
 	dividerMinSplitMass   = 40.0
 	dividerMaxFragments   = 16
+	cactusTriggerRatio    = 0.38
+	cactusFragmentMassMin = 24.0
 
 	// 공간 분할(Spatial Partitioning) 관련 상수
 	spatialCellSize = 500.0
-	spatialGridCols = (int(worldSize) / int(spatialCellSize)) + 1
+	spatialGridCols = (int(maxWorldSize) / int(spatialCellSize)) + 1
 	spatialGridRows = spatialGridCols
 )
 
@@ -65,15 +77,21 @@ type gameState struct {
 	chats        []chatEntry
 	config       runtimeConfig
 	spatialCache *spatialGrid
+	lastCactusRelocation   time.Time
+	lastWormholeRelocation time.Time
+	lastProbioticSpawn     time.Time
 }
 
 type runtimeConfig struct {
-	MinimumPlayers int     `json:"minimumPlayers"`
-	CactusCount    int     `json:"cactusCount"`
-	WormholePairs  int     `json:"wormholePairs"`
-	BaseSpeed      float64 `json:"baseSpeed"`
-	SpeedDivisor   float64 `json:"speedDivisor"`
-	MinimumSpeed   float64 `json:"minimumSpeed"`
+	MinimumPlayers         int     `json:"minimumPlayers"`
+	CactusCount            int     `json:"cactusCount"`
+	WormholePairs          int     `json:"wormholePairs"`
+	CactusRelocateSeconds  int     `json:"cactusRelocateSeconds"`
+	WormholeRelocateSeconds int    `json:"wormholeRelocateSeconds"`
+	WorldSize              float64 `json:"worldSize"`
+	BaseSpeed              float64 `json:"baseSpeed"`
+	SpeedDivisor           float64 `json:"speedDivisor"`
+	MinimumSpeed           float64 `json:"minimumSpeed"`
 }
 
 type player struct {
@@ -95,6 +113,9 @@ type player struct {
 	EffectRemaining   int64     `json:"effectRemaining"`
 	CooldownUntil     time.Time `json:"-"`
 	EffectUntil       time.Time `json:"-"`
+	ProbioticUntil    time.Time `json:"-"`
+	ShieldUntil       time.Time `json:"-"`
+	SpeedBoostUntil   time.Time `json:"-"`
 	CactusUntil       time.Time `json:"-"`
 	PortalUntil       time.Time `json:"-"`
 	MergeReadyAt      time.Time `json:"-"`
@@ -116,6 +137,7 @@ type food struct {
 	Y      float64 `json:"y"`
 	Radius float64 `json:"radius"`
 	Value  float64 `json:"value"`
+	Kind   string  `json:"kind,omitempty"`
 	VX     float64 `json:"-"`
 	VY     float64 `json:"-"`
 }
@@ -171,6 +193,7 @@ type snapshotMessage struct {
 	Wormholes   []*wormhole    `json:"wormholes"`
 	Leaderboard []ownerSummary `json:"leaderboard"`
 	Chats       []chatEntry    `json:"chats"`
+	Config      runtimeConfig  `json:"config"`
 }
 
 type ownerSummary struct {
@@ -195,12 +218,20 @@ type adminStatusResponse struct {
 }
 
 type adminConfigRequest struct {
-	MinimumPlayers *int     `json:"minimumPlayers"`
-	CactusCount    *int     `json:"cactusCount"`
-	WormholePairs  *int     `json:"wormholePairs"`
-	BaseSpeed      *float64 `json:"baseSpeed"`
-	SpeedDivisor   *float64 `json:"speedDivisor"`
-	MinimumSpeed   *float64 `json:"minimumSpeed"`
+	MinimumPlayers          *int     `json:"minimumPlayers"`
+	CactusCount             *int     `json:"cactusCount"`
+	WormholePairs           *int     `json:"wormholePairs"`
+	CactusRelocateSeconds   *int     `json:"cactusRelocateSeconds"`
+	WormholeRelocateSeconds *int     `json:"wormholeRelocateSeconds"`
+	WorldSize               *float64 `json:"worldSize"`
+	BaseSpeed               *float64 `json:"baseSpeed"`
+	SpeedDivisor            *float64 `json:"speedDivisor"`
+	MinimumSpeed            *float64 `json:"minimumSpeed"`
+}
+
+type superAdminConfig struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type wsConn struct {
@@ -256,21 +287,24 @@ func getCellIndex(x, y float64) (int, int) {
 func main() {
 	mathrand.Seed(time.Now().UnixNano())
 
+	config := defaultRuntimeConfig()
+	if loaded, err := loadRuntimeConfig(); err != nil {
+		log.Printf("failed to load runtime config: %v", err)
+	} else {
+		config = loaded
+	}
+
 	state := &gameState{
-		players:   make(map[string]*player),
-		foods:     make([]*food, 0, foodTarget),
-		cacti:     make([]*cactus, 0, cactusTarget),
-		wormholes: make([]*wormhole, 0, defaultWormholePairs*2),
-		chats:     make([]chatEntry, 0, 20),
-		config: runtimeConfig{
-			MinimumPlayers: defaultMinimumPlayers,
-			CactusCount:    cactusTarget,
-			WormholePairs:  defaultWormholePairs,
-			BaseSpeed:      defaultBaseSpeed,
-			SpeedDivisor:   defaultSpeedDivisor,
-			MinimumSpeed:   defaultMinimumSpeed,
-		},
-		spatialCache: newSpatialGrid(),
+		players:                make(map[string]*player),
+		foods:                  make([]*food, 0, foodTarget),
+		cacti:                  make([]*cactus, 0, cactusTarget),
+		wormholes:              make([]*wormhole, 0, defaultWormholePairs*2),
+		chats:                  make([]chatEntry, 0, 20),
+		config:                 config,
+		spatialCache:           newSpatialGrid(),
+		lastCactusRelocation:   time.Now(),
+		lastWormholeRelocation: time.Now(),
+		lastProbioticSpawn:     time.Now(),
 	}
 	state.seedFoods()
 	state.seedCacti()
@@ -306,6 +340,7 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 	cellType := sanitizeCellType(req.CellType)
 	playerID := randomID()
 	sessionID := randomID()
+	worldSize := s.worldSize()
 
 	p := &player{
 		ID:        playerID,
@@ -314,8 +349,8 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Nickname:  nickname,
 		CellType:  cellType,
 		Ability:   abilityName(cellType),
-		X:         400 + mathrand.Float64()*(worldSize-800),
-		Y:         400 + mathrand.Float64()*(worldSize-800),
+		X:         spawnCoordinate(worldSize, 400),
+		Y:         spawnCoordinate(worldSize, 400),
 		Mass:      playerStartMass,
 		Radius:    massToRadius(playerStartMass),
 		Scale:     1,
@@ -422,6 +457,15 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.WormholePairs != nil {
 		s.config.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
 	}
+	if req.CactusRelocateSeconds != nil {
+		s.config.CactusRelocateSeconds = int(math.Max(0, float64(*req.CactusRelocateSeconds)))
+	}
+	if req.WormholeRelocateSeconds != nil {
+		s.config.WormholeRelocateSeconds = int(math.Max(0, float64(*req.WormholeRelocateSeconds)))
+	}
+	if req.WorldSize != nil {
+		s.config.WorldSize = sanitizeWorldSize(*req.WorldSize)
+	}
 	if req.BaseSpeed != nil {
 		s.config.BaseSpeed = math.Max(50, *req.BaseSpeed)
 	}
@@ -431,11 +475,20 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.MinimumSpeed != nil {
 		s.config.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
 	}
+	s.config = normalizeRuntimeConfig(s.config)
+	s.clampWorldObjectsLocked()
 	s.reconcileCactiLocked()
 	s.reconcileWormholesLocked()
 	s.reconcileBotsLocked()
+	s.lastCactusRelocation = time.Now()
+	s.lastWormholeRelocation = time.Now()
 	config := s.config
 	s.mu.Unlock()
+
+	if err := saveRuntimeConfig(config); err != nil {
+		http.Error(w, "failed to persist config", http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, config)
 }
@@ -620,6 +673,9 @@ func (s *gameState) updateWorld() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	s.maybeRelocateHazardsLocked(now)
+	s.maybeSpawnProbioticsLocked(now)
+	worldSize := s.worldSize()
 	for _, f := range s.foods {
 		if math.Abs(f.VX) > 0.01 || math.Abs(f.VY) > 0.01 {
 			f.X = clamp(f.X+f.VX/tickRate, f.Radius, worldSize-f.Radius)
@@ -643,12 +699,18 @@ func (s *gameState) updateWorld() {
 		}
 
 		speed := s.movementSpeed(p.Mass)
+		scaleMultiplier := 1.0
+		if now.Before(p.ProbioticUntil) {
+			scaleMultiplier *= 2
+		}
+		if now.Before(p.SpeedBoostUntil) {
+			speed *= probioticSpeedBoost
+		}
 		switch {
 		case p.CellType == "giant" && now.Before(p.EffectUntil):
 			speed *= 0.68
-			p.Scale = 1.9
+			scaleMultiplier *= 1.9
 		case p.CellType == "classic": // ✅ 오버클럭 에너지 제어 로직
-			p.Scale = 1
 			depleteRate := 4000.0 / (1.5 * tickRate)  // 1.5초 만에 방전
 			rechargeRate := 4000.0 / (4.0 * tickRate) // 4초 만에 완충
 
@@ -667,9 +729,8 @@ func (s *gameState) updateWorld() {
 					p.Energy = 4000
 				}
 			}
-		default:
-			p.Scale = 1
 		}
+		p.Scale = scaleMultiplier
 		effectiveRadius := currentRadius(p)
 		p.X = clamp(p.X+p.Direction.X*speed/tickRate, effectiveRadius, worldSize-effectiveRadius)
 		p.Y = clamp(p.Y+p.Direction.Y*speed/tickRate, effectiveRadius, worldSize-effectiveRadius)
@@ -682,8 +743,25 @@ func (s *gameState) updateWorld() {
 		for i := len(s.foods) - 1; i >= 0; i-- {
 			f := s.foods[i]
 			if distance(p.X, p.Y, f.X, f.Y) < effectiveRadius+f.Radius {
-				p.Mass += f.Value
-				p.Radius = massToRadius(p.Mass)
+				if isBeneficialFoodKind(f.Kind) {
+					ownerID := p.OwnerID
+					if ownerID == "" {
+						ownerID = p.ID
+					}
+					for _, fragment := range s.ownedPlayersLocked(ownerID) {
+						switch f.Kind {
+						case "probiotic-speed":
+							fragment.SpeedBoostUntil = now.Add(probioticSpeedDuration)
+						case "probiotic-shield":
+							fragment.ShieldUntil = now.Add(probioticShieldDuration)
+						default:
+							fragment.ProbioticUntil = now.Add(probioticGrowthDuration)
+						}
+					}
+				} else {
+					p.Mass += f.Value
+					p.Radius = massToRadius(p.Mass)
+				}
 
 				// [Memory Leak Fix]: 요소를 삭제할 때 끝부분의 포인터를 nil로 명시적 해제
 				s.foods[i] = s.foods[len(s.foods)-1]
@@ -707,6 +785,7 @@ func (s *gameState) resolvePlayerEating() {
 	}
 
 	now := time.Now() // 현재 시간 한 번만 호출
+	worldSize := s.worldSize()
 
 	for i := 0; i < len(players); i++ {
 		for j := i + 1; j < len(players); j++ {
@@ -846,6 +925,7 @@ func (s *gameState) broadcastSnapshot() {
 	}
 	var targets []snapshotTarget
 	chats := cloneChats(s.chats)
+	config := s.config
 
 	// 3. 접속 중인 유저별로 타겟 페이로드 생성
 	for _, viewer := range s.players {
@@ -924,6 +1004,7 @@ func (s *gameState) broadcastSnapshot() {
 				Wormholes:   wormholes,
 				Leaderboard: leaderboard,
 				Chats:       chats,
+				Config:      config,
 			},
 		})
 	}
@@ -1003,6 +1084,7 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 	}
 	leaderboard := buildOwnerLeaderboard(s.players)
 	chats := cloneChats(s.chats)
+	config := s.config
 	s.mu.RUnlock()
 
 	return json.Marshal(snapshotMessage{
@@ -1013,18 +1095,19 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 		Wormholes:   wormholes,
 		Leaderboard: leaderboard,
 		Chats:       chats,
+		Config:      config,
 	})
 }
 
 func (s *gameState) seedFoods() {
-	for len(s.foods) < foodTarget {
-		s.foods = append(s.foods, createFood())
+	for countFoodsByKind(s.foods, "food") < foodTarget {
+		s.foods = append(s.foods, createFood(s.worldSize()))
 	}
 }
 
 func (s *gameState) seedCacti() {
 	for len(s.cacti) < cactusTarget {
-		s.cacti = append(s.cacti, createCactus())
+		s.cacti = append(s.cacti, createCactus(s.worldSize()))
 	}
 }
 
@@ -1039,7 +1122,7 @@ func (s *gameState) reconcileCactiLocked() {
 		s.cacti = s.cacti[:len(s.cacti)-1]
 	}
 	for len(s.cacti) < target {
-		s.cacti = append(s.cacti, createCactus())
+		s.cacti = append(s.cacti, createCactus(s.worldSize()))
 	}
 }
 
@@ -1059,19 +1142,87 @@ func (s *gameState) reconcileWormholesLocked() {
 
 	for len(s.wormholes) < targetCount {
 		pairID := randomID()
-		entry := createWormhole("blackhole", pairID)
-		exit := createWormhole("whitehole", pairID)
+		entry := createWormhole(s.worldSize(), "blackhole", pairID)
+		exit := createWormhole(s.worldSize(), "whitehole", pairID)
 		for distance(entry.X, entry.Y, exit.X, exit.Y) < 700 {
-			exit = createWormhole("whitehole", pairID)
+			exit = createWormhole(s.worldSize(), "whitehole", pairID)
 		}
 		s.wormholes = append(s.wormholes, entry, exit)
 	}
 }
 
 func (s *gameState) topUpFoods() {
-	for len(s.foods) < foodTarget {
-		s.foods = append(s.foods, createFood())
+	for countFoodsByKind(s.foods, "food") < foodTarget {
+		s.foods = append(s.foods, createFood(s.worldSize()))
 	}
+}
+
+func (s *gameState) maybeSpawnProbioticsLocked(now time.Time) {
+	if countBeneficialFoods(s.foods) >= probioticTarget {
+		return
+	}
+	if now.Sub(s.lastProbioticSpawn) < probioticSpawnEvery {
+		return
+	}
+	s.foods = append(s.foods, createProbiotic(s.worldSize()))
+	s.lastProbioticSpawn = now
+}
+
+func (s *gameState) maybeRelocateHazardsLocked(now time.Time) {
+	if s.config.CactusRelocateSeconds > 0 && now.Sub(s.lastCactusRelocation) >= time.Duration(s.config.CactusRelocateSeconds)*time.Second {
+		s.relocateCactiLocked()
+		s.lastCactusRelocation = now
+	}
+	if s.config.WormholeRelocateSeconds > 0 && now.Sub(s.lastWormholeRelocation) >= time.Duration(s.config.WormholeRelocateSeconds)*time.Second {
+		s.relocateWormholesLocked()
+		s.lastWormholeRelocation = now
+	}
+}
+
+func (s *gameState) relocateCactiLocked() {
+	target := len(s.cacti)
+	s.cacti = s.cacti[:0]
+	for i := 0; i < target; i++ {
+		s.cacti = append(s.cacti, createCactus(s.worldSize()))
+	}
+}
+
+func (s *gameState) relocateWormholesLocked() {
+	targetPairs := len(s.wormholes) / 2
+	s.wormholes = s.wormholes[:0]
+	for i := 0; i < targetPairs; i++ {
+		pairID := randomID()
+		entry := createWormhole(s.worldSize(), "blackhole", pairID)
+		exit := createWormhole(s.worldSize(), "whitehole", pairID)
+		for distance(entry.X, entry.Y, exit.X, exit.Y) < 700 {
+			exit = createWormhole(s.worldSize(), "whitehole", pairID)
+		}
+		s.wormholes = append(s.wormholes, entry, exit)
+	}
+}
+
+func countFoodsByKind(foods []*food, kind string) int {
+	count := 0
+	for _, item := range foods {
+		currentKind := item.Kind
+		if currentKind == "" {
+			currentKind = "food"
+		}
+		if currentKind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func countBeneficialFoods(foods []*food) int {
+	count := 0
+	for _, item := range foods {
+		if isBeneficialFoodKind(item.Kind) {
+			count++
+		}
+	}
+	return count
 }
 
 func serveStatic(w http.ResponseWriter, r *http.Request) {
@@ -1131,13 +1282,106 @@ func appBaseDir() (string, error) {
 	return filepath.Dir(exePath), nil
 }
 
-func requireSuperAuth(w http.ResponseWriter, r *http.Request) bool {
-	expectedUser := "sdlckdrl"
-	expectedPassword := os.Getenv("SUPER_PASSWORD")
-	if expectedPassword == "" {
-		expectedPassword = "1729ck!@"
+func appConfigPath(name string) (string, error) {
+	root, err := appBaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, name), nil
+}
+
+func configSearchPaths(name string) []string {
+	paths := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil {
+		paths = append(paths, filepath.Join(cwd, name))
+	}
+	if exePath, err := appConfigPath(name); err == nil {
+		for _, existing := range paths {
+			if strings.EqualFold(existing, exePath) {
+				return paths
+			}
+		}
+		paths = append(paths, exePath)
+	}
+	return paths
+}
+
+func defaultRuntimeConfig() runtimeConfig {
+	return runtimeConfig{
+		MinimumPlayers:          defaultMinimumPlayers,
+		CactusCount:             cactusTarget,
+		WormholePairs:           defaultWormholePairs,
+		CactusRelocateSeconds:   0,
+		WormholeRelocateSeconds: 0,
+		WorldSize:               defaultWorldSize,
+		BaseSpeed:               defaultBaseSpeed,
+		SpeedDivisor:            defaultSpeedDivisor,
+		MinimumSpeed:            defaultMinimumSpeed,
+	}
+}
+
+func runtimeConfigPath() (string, error) {
+	return appConfigPath(configFileName)
+}
+
+func loadRuntimeConfig() (runtimeConfig, error) {
+	path, err := runtimeConfigPath()
+	if err != nil {
+		return defaultRuntimeConfig(), err
 	}
 
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultRuntimeConfig(), nil
+		}
+		return defaultRuntimeConfig(), err
+	}
+
+	config := defaultRuntimeConfig()
+	if err := json.Unmarshal(data, &config); err != nil {
+		return defaultRuntimeConfig(), err
+	}
+	return normalizeRuntimeConfig(config), nil
+}
+
+func saveRuntimeConfig(config runtimeConfig) error {
+	path, err := runtimeConfigPath()
+	if err != nil {
+		return err
+	}
+
+	normalized := normalizeRuntimeConfig(config)
+	data, err := json.MarshalIndent(normalized, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func normalizeRuntimeConfig(config runtimeConfig) runtimeConfig {
+	config.MinimumPlayers = int(math.Max(0, float64(config.MinimumPlayers)))
+	config.CactusCount = int(math.Max(0, float64(config.CactusCount)))
+	config.WormholePairs = int(math.Max(0, float64(config.WormholePairs)))
+	config.CactusRelocateSeconds = int(math.Max(0, float64(config.CactusRelocateSeconds)))
+	config.WormholeRelocateSeconds = int(math.Max(0, float64(config.WormholeRelocateSeconds)))
+	config.WorldSize = sanitizeWorldSize(config.WorldSize)
+	config.BaseSpeed = math.Max(50, config.BaseSpeed)
+	config.SpeedDivisor = math.Max(1, config.SpeedDivisor)
+	config.MinimumSpeed = math.Max(10, config.MinimumSpeed)
+	return config
+}
+
+func requireSuperAuth(w http.ResponseWriter, r *http.Request) bool {
+	credentials, err := loadSuperAdminConfig()
+	if err != nil {
+		log.Printf("super admin auth unavailable: %v", err)
+		http.Error(w, "super admin credentials are not configured", http.StatusServiceUnavailable)
+		return false
+	}
+
+	expectedUser := credentials.Username
+	expectedPassword := credentials.Password
 	expectedToken := superAuthToken(expectedUser, expectedPassword)
 	if cookie, err := r.Cookie("super_auth"); err == nil && cookie.Value == expectedToken {
 		return true
@@ -1161,46 +1405,113 @@ func requireSuperAuth(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+func loadSuperAdminConfig() (superAdminConfig, error) {
+	paths := configSearchPaths(superAdminConfigFileName)
+	for _, path := range paths {
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			var config superAdminConfig
+			if err := json.Unmarshal(data, &config); err != nil {
+				return superAdminConfig{}, fmt.Errorf("invalid %s at %s: %w", superAdminConfigFileName, path, err)
+			}
+			config.Username = strings.TrimSpace(config.Username)
+			config.Password = strings.TrimSpace(config.Password)
+			if config.Username == "" || config.Password == "" {
+				return superAdminConfig{}, fmt.Errorf("%s at %s must include username and password", superAdminConfigFileName, path)
+			}
+			return config, nil
+		} else if !os.IsNotExist(readErr) {
+			return superAdminConfig{}, readErr
+		}
+	}
+
+	config := superAdminConfig{
+		Username: strings.TrimSpace(os.Getenv("SUPER_USERNAME")),
+		Password: strings.TrimSpace(os.Getenv("SUPER_PASSWORD")),
+	}
+	if config.Username == "" || config.Password == "" {
+		return superAdminConfig{}, fmt.Errorf("%s not found in working directory or executable directory, and SUPER_USERNAME/SUPER_PASSWORD are empty", superAdminConfigFileName)
+	}
+	return config, nil
+}
+
 func superAuthToken(username, password string) string {
 	hash := sha1.Sum([]byte(username + ":" + password + ":super"))
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
-func createFood() *food {
+func createFood(worldSize float64) *food {
 	return &food{
 		ID:     randomID(),
-		X:      30 + mathrand.Float64()*(worldSize-60),
-		Y:      30 + mathrand.Float64()*(worldSize-60),
+		X:      spawnCoordinate(worldSize, 30),
+		Y:      spawnCoordinate(worldSize, 30),
 		Radius: 6 + mathrand.Float64()*3,
 		Value:  2 + mathrand.Float64()*2,
+		Kind:   "food",
 	}
 }
 
-func createCactus() *cactus {
+func createProbiotic(worldSize float64) *food {
+	kind := randomBeneficialFoodKind()
+	radius := 12 + mathrand.Float64()*3
+	if kind == "probiotic-shield" {
+		radius += 1.5
+	}
+	return &food{
+		ID:     randomID(),
+		X:      spawnCoordinate(worldSize, 80),
+		Y:      spawnCoordinate(worldSize, 80),
+		Radius: radius,
+		Value:  0,
+		Kind:   kind,
+	}
+}
+
+func randomBeneficialFoodKind() string {
+	roll := mathrand.Float64()
+	switch {
+	case roll < 0.46:
+		return "probiotic-growth"
+	case roll < 0.82:
+		return "probiotic-speed"
+	default:
+		return "probiotic-shield"
+	}
+}
+
+func isBeneficialFoodKind(kind string) bool {
+	switch kind {
+	case "probiotic", "probiotic-growth", "probiotic-speed", "probiotic-shield":
+		return true
+	default:
+		return false
+	}
+}
+
+func createCactus(worldSize float64) *cactus {
 	size := 20 + mathrand.Float64()*18
 	return &cactus{
 		ID:     randomID(),
-		X:      120 + mathrand.Float64()*(worldSize-240),
-		Y:      120 + mathrand.Float64()*(worldSize-240),
+		X:      spawnCoordinate(worldSize, 120),
+		Y:      spawnCoordinate(worldSize, 120),
 		Size:   size,
 		Height: size * (1.4 + mathrand.Float64()*0.6),
 	}
 }
 
-func createWormhole(kind, pairID string) *wormhole {
+func createWormhole(worldSize float64, kind, pairID string) *wormhole {
 	radius := 34 + mathrand.Float64()*10
 	return &wormhole{
 		ID:        randomID(),
 		Kind:      kind,
 		PairID:    pairID,
-		X:         240 + mathrand.Float64()*(worldSize-480),
-		Y:         240 + mathrand.Float64()*(worldSize-480),
+		X:         spawnCoordinate(worldSize, 240),
+		Y:         spawnCoordinate(worldSize, 240),
 		Radius:    radius,
 		PullRange: radius * 4.6,
 	}
 }
 
-func respawnPlayer(p *player) {
+func respawnPlayer(p *player, worldSize float64) {
 	ownerID := p.OwnerID
 	if ownerID == "" {
 		ownerID = p.ID
@@ -1208,13 +1519,16 @@ func respawnPlayer(p *player) {
 	p.Energy = 4000
 	p.Mass = playerStartMass
 	p.Radius = massToRadius(playerStartMass)
-	p.X = 400 + mathrand.Float64()*(worldSize-800)
-	p.Y = 400 + mathrand.Float64()*(worldSize-800)
+	p.X = spawnCoordinate(worldSize, 400)
+	p.Y = spawnCoordinate(worldSize, 400)
 	p.Scale = 1
 	p.OwnerID = ownerID
 	p.Direction = direction{}
 	p.CooldownUntil = time.Time{}
 	p.EffectUntil = time.Time{}
+	p.ProbioticUntil = time.Time{}
+	p.ShieldUntil = time.Time{}
+	p.SpeedBoostUntil = time.Time{}
 	p.CactusUntil = time.Time{}
 	p.PortalUntil = time.Time{}
 	p.MergeReadyAt = time.Time{}
@@ -1272,6 +1586,7 @@ func (s *gameState) ownedPlayersLocked(ownerID string) []*player {
 func (s *gameState) ownerCenterLocked(ownerID string) (float64, float64) {
 	fragments := s.ownedPlayersLocked(ownerID)
 	if len(fragments) == 0 {
+		worldSize := s.worldSize()
 		return worldSize * 0.5, worldSize * 0.5
 	}
 
@@ -1296,7 +1611,7 @@ func (s *gameState) handleConsumedPlayerLocked(victim *player) {
 	}
 	fragments := s.ownedPlayersLocked(ownerID)
 	if len(fragments) <= 1 {
-		respawnPlayer(victim)
+		respawnPlayer(victim, s.worldSize())
 		return
 	}
 
@@ -1307,7 +1622,7 @@ func (s *gameState) handleConsumedPlayerLocked(victim *player) {
 
 	successor := largestOwnedFragmentExcluding(fragments, victim.ID)
 	if successor == nil {
-		respawnPlayer(victim)
+		respawnPlayer(victim, s.worldSize())
 		return
 	}
 
@@ -1319,6 +1634,9 @@ func (s *gameState) handleConsumedPlayerLocked(victim *player) {
 	victim.Direction = successor.Direction
 	victim.CooldownUntil = successor.CooldownUntil
 	victim.EffectUntil = successor.EffectUntil
+	victim.ProbioticUntil = successor.ProbioticUntil
+	victim.ShieldUntil = successor.ShieldUntil
+	victim.SpeedBoostUntil = successor.SpeedBoostUntil
 	victim.CactusUntil = successor.CactusUntil
 	victim.PortalUntil = successor.PortalUntil
 	victim.MergeReadyAt = successor.MergeReadyAt
@@ -1415,7 +1733,12 @@ func (s *gameState) resolveOwnedMergesLocked(now time.Time) {
 					if now.Before(b.MergeReadyAt) {
 						continue
 					}
-					if distance(a.X, a.Y, b.X, b.Y) > (currentRadius(a)+currentRadius(b))*0.62 {
+					elapsedAfterReady := math.Min(
+						now.Sub(a.MergeReadyAt).Seconds(),
+						now.Sub(b.MergeReadyAt).Seconds(),
+					)
+					mergeDistanceRatio := 0.58 + clamp(elapsedAfterReady/5.8, 0, 1)*0.16
+					if distance(a.X, a.Y, b.X, b.Y) > (currentRadius(a)+currentRadius(b))*mergeDistanceRatio {
 						continue
 					}
 					s.mergeOwnedPairLocked(ownerID, a, b)
@@ -1432,6 +1755,7 @@ func (s *gameState) resolveOwnedMergesLocked(now time.Time) {
 }
 
 func (s *gameState) applyOwnedCohesionLocked(now time.Time) {
+	worldSize := s.worldSize()
 	owners := make(map[string][]*player)
 	for _, p := range s.players {
 		ownerID := p.OwnerID
@@ -1450,9 +1774,6 @@ func (s *gameState) applyOwnedCohesionLocked(now time.Time) {
 		var centerY float64
 		var totalMass float64
 		for _, fragment := range fragments {
-			if now.Before(fragment.MergeReadyAt) {
-				continue
-			}
 			centerX += fragment.X * fragment.Mass
 			centerY += fragment.Y * fragment.Mass
 			totalMass += fragment.Mass
@@ -1465,25 +1786,86 @@ func (s *gameState) applyOwnedCohesionLocked(now time.Time) {
 		centerY /= totalMass
 
 		for _, fragment := range fragments {
-			if now.Before(fragment.MergeReadyAt) {
-				continue
-			}
-
 			distToCenter := distance(fragment.X, fragment.Y, centerX, centerY)
 			if distToCenter > 1 {
 				dirX := (centerX - fragment.X) / distToCenter
 				dirY := (centerY - fragment.Y) / distToCenter
 				movementIntent := math.Hypot(fragment.Direction.X, fragment.Direction.Y)
-				idleBoost := 1.0
-				if movementIntent < 0.18 {
-					idleBoost = 2.25
-				} else if movementIntent < 0.45 {
-					idleBoost = 1.45
+				mergePullBoost := 1.0
+				if now.Before(fragment.MergeReadyAt) {
+					progress := 1 - clamp(fragment.MergeReadyAt.Sub(now).Seconds()/dividerMergeDelay.Seconds(), 0, 1)
+					mergePullBoost = 0.04 + progress*0.96
+				} else {
+					postReadyProgress := clamp(now.Sub(fragment.MergeReadyAt).Seconds()/5.8, 0, 1)
+					mergePullBoost = 1.48 + postReadyProgress*1.42
 				}
-				pull := math.Min(54, distToCenter*0.14) * idleBoost / tickRate
+				idleBoost := 2.25
+				if movementIntent < 0.18 {
+					idleBoost = 3.4
+				} else if movementIntent < 0.45 {
+					idleBoost = 2.55
+				} else if movementIntent < 0.8 {
+					idleBoost = 2.05
+				}
+				idleBoost *= mergePullBoost
+				pull := math.Min(108, distToCenter*0.25) * idleBoost / tickRate
 				radius := currentRadius(fragment)
 				fragment.X = clamp(fragment.X+dirX*pull, radius, worldSize-radius)
 				fragment.Y = clamp(fragment.Y+dirY*pull, radius, worldSize-radius)
+			}
+		}
+
+		for i := 0; i < len(fragments); i++ {
+			a := fragments[i]
+			if _, ok := s.players[a.ID]; !ok {
+				continue
+			}
+			for j := i + 1; j < len(fragments); j++ {
+				b := fragments[j]
+				if _, ok := s.players[b.ID]; !ok {
+					continue
+				}
+
+				radiusA := currentRadius(a)
+				radiusB := currentRadius(b)
+				dist := distance(a.X, a.Y, b.X, b.Y)
+				softGapRatio := 0.78
+				if now.Before(a.MergeReadyAt) || now.Before(b.MergeReadyAt) {
+					remainingA := clamp(a.MergeReadyAt.Sub(now).Seconds()/dividerMergeDelay.Seconds(), 0, 1)
+					remainingB := clamp(b.MergeReadyAt.Sub(now).Seconds()/dividerMergeDelay.Seconds(), 0, 1)
+					remaining := math.Max(remainingA, remainingB)
+					softGapRatio = 0.84 + remaining*0.32
+				} else {
+					elapsedAfterReady := math.Min(
+						now.Sub(a.MergeReadyAt).Seconds(),
+						now.Sub(b.MergeReadyAt).Seconds(),
+					)
+					postReadyProgress := clamp(elapsedAfterReady/5.8, 0, 1)
+					softGapRatio = 0.74 - postReadyProgress*0.12
+				}
+				softGap := (radiusA + radiusB) * softGapRatio
+				if dist >= softGap {
+					continue
+				}
+
+				if dist < 0.001 {
+					dist = 0.001
+				}
+				dirX := (a.X - b.X) / dist
+				dirY := (a.Y - b.Y) / dist
+				separation := (softGap - dist) * 0.5
+				pushA := separation
+				pushB := separation
+				totalMass := a.Mass + b.Mass
+				if totalMass > 0 {
+					pushA *= b.Mass / totalMass
+					pushB *= a.Mass / totalMass
+				}
+
+				a.X = clamp(a.X+dirX*pushA, radiusA, worldSize-radiusA)
+				a.Y = clamp(a.Y+dirY*pushA, radiusA, worldSize-radiusA)
+				b.X = clamp(b.X-dirX*pushB, radiusB, worldSize-radiusB)
+				b.Y = clamp(b.Y-dirY*pushB, radiusB, worldSize-radiusB)
 			}
 		}
 	}
@@ -1706,8 +2088,53 @@ func clamp(value, min, max float64) float64 {
 	return value
 }
 
+func sanitizeWorldSize(size float64) float64 {
+	if math.IsNaN(size) || math.IsInf(size, 0) {
+		return defaultWorldSize
+	}
+	return clamp(size, minWorldSize, maxWorldSize)
+}
+
+func spawnCoordinate(worldSize, padding float64) float64 {
+	if worldSize <= padding*2 {
+		return worldSize * 0.5
+	}
+	return padding + mathrand.Float64()*(worldSize-padding*2)
+}
+
+func (s *gameState) worldSize() float64 {
+	if s == nil {
+		return defaultWorldSize
+	}
+	return sanitizeWorldSize(s.config.WorldSize)
+}
+
+func (s *gameState) clampWorldObjectsLocked() {
+	worldSize := s.worldSize()
+	for _, p := range s.players {
+		radius := currentRadius(p)
+		p.X = clamp(p.X, radius, worldSize-radius)
+		p.Y = clamp(p.Y, radius, worldSize-radius)
+	}
+	for _, f := range s.foods {
+		f.X = clamp(f.X, f.Radius, worldSize-f.Radius)
+		f.Y = clamp(f.Y, f.Radius, worldSize-f.Radius)
+	}
+	for _, c := range s.cacti {
+		padding := c.Size * 1.3
+		c.X = clamp(c.X, padding, worldSize-padding)
+		c.Y = clamp(c.Y, padding, worldSize-padding)
+	}
+	for _, w := range s.wormholes {
+		padding := w.PullRange
+		w.X = clamp(w.X, padding, worldSize-padding)
+		w.Y = clamp(w.Y, padding, worldSize-padding)
+	}
+}
+
 func (s *gameState) tryUseAbility(p *player) {
 	now := time.Now()
+	worldSize := s.worldSize()
 	if now.Before(p.CooldownUntil) {
 		return
 	}
@@ -1742,6 +2169,7 @@ func (s *gameState) tryUseAbility(p *player) {
 }
 
 func (s *gameState) trySplit(p *player) {
+	worldSize := s.worldSize()
 	if p.Mass < 55 {
 		return
 	}
@@ -1769,6 +2197,7 @@ func (s *gameState) trySplit(p *player) {
 }
 
 func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
+	worldSize := s.worldSize()
 	ownerID := p.OwnerID
 	if ownerID == "" {
 		ownerID = p.ID
@@ -1823,6 +2252,9 @@ func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
 			LastSeen:       fragment.LastSeen,
 			NextBotThinkAt: fragment.NextBotThinkAt,
 			IsAbilityActive: fragment.IsAbilityActive,
+			ProbioticUntil: fragment.ProbioticUntil,
+			ShieldUntil:    fragment.ShieldUntil,
+			SpeedBoostUntil: fragment.SpeedBoostUntil,
 			Energy:         fragment.Energy,
 		}
 
@@ -1848,12 +2280,20 @@ func currentRadius(p *player) float64 {
 	return p.Radius * math.Max(1, p.Scale)
 }
 
+func effectiveCombatMass(p *player) float64 {
+	return p.Mass * math.Max(1, p.Scale)
+}
+
 func canEatPlayer(attacker, defender *player, gap float64) bool {
 	if gap >= currentRadius(attacker) {
 		return false
 	}
 
-	if attacker.Mass <= defender.Mass*1.1 {
+	if time.Now().Before(defender.ShieldUntil) {
+		return false
+	}
+
+	if effectiveCombatMass(attacker) <= effectiveCombatMass(defender)*1.1 {
 		return false
 	}
 
@@ -1896,6 +2336,7 @@ func (s *gameState) pullNearbyFoodLocked(p *player, radius float64) {
 }
 
 func (s *gameState) applyWormholeForceLocked(p *player, now time.Time) {
+	worldSize := s.worldSize()
 	for _, hole := range s.wormholes {
 		if hole.Kind != "blackhole" {
 			continue
@@ -1931,11 +2372,38 @@ func (s *gameState) applyWormholeForceLocked(p *player, now time.Time) {
 			offset = direction{X: 1}
 		}
 
-		spawnDistance := exit.Radius + currentRadius(p) + 24
-		p.X = clamp(exit.X+offset.X*spawnDistance, currentRadius(p), worldSize-currentRadius(p))
-		p.Y = clamp(exit.Y+offset.Y*spawnDistance, currentRadius(p), worldSize-currentRadius(p))
-		p.PortalUntil = now.Add(1500 * time.Millisecond)
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		s.teleportOwnerThroughWormholeLocked(ownerID, p, exit, offset, now, worldSize)
 		return
+	}
+}
+
+func (s *gameState) teleportOwnerThroughWormholeLocked(ownerID string, trigger *player, exit *wormhole, offset direction, now time.Time, worldSize float64) {
+	fragments := s.ownedPlayersLocked(ownerID)
+	if len(fragments) == 0 {
+		return
+	}
+
+	centerX, centerY := s.ownerCenterLocked(ownerID)
+	maxRadius := 0.0
+	for _, fragment := range fragments {
+		maxRadius = math.Max(maxRadius, currentRadius(fragment))
+	}
+
+	targetCenterX := exit.X + offset.X*(exit.Radius+maxRadius+56)
+	targetCenterY := exit.Y + offset.Y*(exit.Radius+maxRadius+56)
+	portalLockUntil := now.Add(1500 * time.Millisecond)
+
+	for _, fragment := range fragments {
+		radius := currentRadius(fragment)
+		relX := fragment.X - centerX
+		relY := fragment.Y - centerY
+		fragment.X = clamp(targetCenterX+relX, radius, worldSize-radius)
+		fragment.Y = clamp(targetCenterY+relY, radius, worldSize-radius)
+		fragment.PortalUntil = portalLockUntil
 	}
 }
 
@@ -1949,6 +2417,7 @@ func (s *gameState) pairedWormholeLocked(entry *wormhole) *wormhole {
 }
 
 func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
+	worldSize := s.worldSize()
 	if now.Before(p.CactusUntil) {
 		return
 	}
@@ -1956,7 +2425,10 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 	for _, c := range s.cacti {
 		cactusRadius := c.Size * 1.18
 		dist := distance(p.X, p.Y, c.X, c.Y)
-		if dist >= currentRadius(p)+cactusRadius {
+		playerRadius := currentRadius(p)
+		overlap := playerRadius + cactusRadius - dist
+		requiredOverlap := math.Min(playerRadius, cactusRadius) * cactusTriggerRatio
+		if overlap <= requiredOverlap {
 			continue
 		}
 
@@ -1968,9 +2440,9 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 		p.CactusUntil = now.Add(1500 * time.Millisecond)
 
 		if p.Mass >= 120 {
-			s.forceSplitFromCactusLocked(p, dir)
+			s.forceSplitFromCactusLocked(p, dir, now)
 		} else {
-			escape := currentRadius(p) + cactusRadius + 10
+			escape := playerRadius + cactusRadius + 10
 			p.X = clamp(c.X+dir.X*escape, currentRadius(p), worldSize-currentRadius(p))
 			p.Y = clamp(c.Y+dir.Y*escape, currentRadius(p), worldSize-currentRadius(p))
 		}
@@ -1978,29 +2450,66 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 	}
 }
 
-func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction) {
+func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction, now time.Time) {
+	worldSize := s.worldSize()
 	loss := math.Min(p.Mass*0.48, 520)
 	remainingMass := math.Max(playerStartMass, p.Mass-loss)
 	splitMass := p.Mass - remainingMass
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
+	fragments := s.ownedPlayersLocked(ownerID)
+	availableSlots := dividerMaxFragments - len(fragments)
+	if availableSlots <= 0 || splitMass < cactusFragmentMassMin {
+		recoil := 42.0
+		p.X = clamp(p.X-dir.X*recoil, currentRadius(p), worldSize-currentRadius(p))
+		p.Y = clamp(p.Y-dir.Y*recoil, currentRadius(p), worldSize-currentRadius(p))
+		return
+	}
+
+	childCount := int(math.Min(float64(availableSlots), math.Max(2, math.Floor(splitMass/cactusFragmentMassMin))))
+	for childCount > 1 && splitMass/float64(childCount) < cactusFragmentMassMin {
+		childCount--
+	}
+
 	p.Mass = remainingMass
 	p.Radius = massToRadius(p.Mass)
+	p.MergeReadyAt = now.Add(dividerMergeDelay)
 
-	chunks := 6
-	perChunk := splitMass * 0.88 / float64(chunks)
+	perChildMass := splitMass / float64(childCount)
 	baseAngle := math.Atan2(dir.Y, dir.X)
-	for i := 0; i < chunks; i += 1 {
-		angle := baseAngle + (float64(i)-float64(chunks-1)/2)*0.34
-		chunkRadius := math.Max(11, math.Sqrt(perChunk)*1.3)
-		chunk := &food{
-			ID:     randomID(),
-			X:      clamp(p.X+math.Cos(angle)*(p.Radius+chunkRadius+18), chunkRadius, worldSize-chunkRadius),
-			Y:      clamp(p.Y+math.Sin(angle)*(p.Radius+chunkRadius+18), chunkRadius, worldSize-chunkRadius),
-			Radius: chunkRadius,
-			Value:  perChunk,
-			VX:     math.Cos(angle) * 520,
-			VY:     math.Sin(angle) * 520,
+	for i := 0; i < childCount; i++ {
+		angle := baseAngle + (float64(i)-float64(childCount-1)/2)*0.42
+		offsetX := math.Cos(angle)
+		offsetY := math.Sin(angle)
+		childRadius := massToRadius(perChildMass)
+		spawnDistance := p.Radius + childRadius + 22
+		child := &player{
+			ID:               randomID(),
+			SessionID:        "",
+			OwnerID:          ownerID,
+			Nickname:         p.Nickname,
+			CellType:         p.CellType,
+			Ability:          p.Ability,
+			X:                clamp(p.X+offsetX*spawnDistance, childRadius, worldSize-childRadius),
+			Y:                clamp(p.Y+offsetY*spawnDistance, childRadius, worldSize-childRadius),
+			Mass:             perChildMass,
+			Radius:           childRadius,
+			Scale:            1,
+			Color:            p.Color,
+			IsBot:            p.IsBot,
+			Direction:        direction{X: offsetX, Y: offsetY},
+			MergeReadyAt:     now.Add(dividerMergeDelay),
+			LastSeen:         p.LastSeen,
+			NextBotThinkAt:   p.NextBotThinkAt,
+			IsAbilityActive:  false,
+			ProbioticUntil:   p.ProbioticUntil,
+			ShieldUntil:      p.ShieldUntil,
+			SpeedBoostUntil:  p.SpeedBoostUntil,
+			Energy:           p.Energy,
 		}
-		s.foods = append(s.foods, chunk)
+		s.players[child.ID] = child
 	}
 
 	recoil := 42.0
@@ -2065,14 +2574,14 @@ func (s *gameState) reconcileBotsLocked() {
 
 	// 3. 부족한 봇 보충
 	for len(botMains) < requiredBots {
-		bot := newBotPlayer(len(botMains)+1, usedBotNicknames)
+		bot := newBotPlayer(len(botMains)+1, usedBotNicknames, s.worldSize())
 		s.players[bot.ID] = bot
 		botMains = append(botMains, bot)
 		usedBotNicknames[bot.Nickname] = struct{}{}
 	}
 }
 
-func newBotPlayer(index int, usedNicknames map[string]struct{}) *player {
+func newBotPlayer(index int, usedNicknames map[string]struct{}, worldSize float64) *player {
 	cellType := randomBotCellType()
 	now := time.Now()
 	mass := playerStartMass + mathrand.Float64()*18
@@ -2084,8 +2593,8 @@ func newBotPlayer(index int, usedNicknames map[string]struct{}) *player {
 		Nickname:       randomBotNickname(index, usedNicknames),
 		CellType:       cellType,
 		Ability:        abilityName(cellType),
-		X:              400 + mathrand.Float64()*(worldSize-800),
-		Y:              400 + mathrand.Float64()*(worldSize-800),
+		X:              spawnCoordinate(worldSize, 400),
+		Y:              spawnCoordinate(worldSize, 400),
 		Mass:           mass,
 		Radius:         massToRadius(mass),
 		Scale:          1,

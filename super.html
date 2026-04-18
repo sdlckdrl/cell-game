@@ -174,6 +174,18 @@
           <input id="wormholePairs" type="number" min="0" step="1">
         </label>
         <label>
+          바이러스 재배치 주기(분)
+          <input id="cactusRelocateMinutes" type="number" min="0" step="1">
+        </label>
+        <label>
+          블랙홀 재배치 주기(분)
+          <input id="wormholeRelocateMinutes" type="number" min="0" step="1">
+        </label>
+        <label>
+          맵 크기
+          <input id="worldSize" type="number" min="1600" max="7200" step="100">
+        </label>
+        <label>
           기본 속도 계수
           <input id="baseSpeed" type="number" min="10" step="1">
         </label>
@@ -201,6 +213,9 @@
     const minimumPlayers = document.getElementById("minimumPlayers");
     const cactusCount = document.getElementById("cactusCount");
     const wormholePairs = document.getElementById("wormholePairs");
+    const cactusRelocateMinutes = document.getElementById("cactusRelocateMinutes");
+    const wormholeRelocateMinutes = document.getElementById("wormholeRelocateMinutes");
+    const worldSize = document.getElementById("worldSize");
     const baseSpeed = document.getElementById("baseSpeed");
     const speedDivisor = document.getElementById("speedDivisor");
     const minimumSpeed = document.getElementById("minimumSpeed");
@@ -208,7 +223,7 @@
     const configForm = document.getElementById("configForm");
     const refreshButton = document.getElementById("refreshButton");
 
-    const inputs = [minimumPlayers, cactusCount, wormholePairs, baseSpeed, speedDivisor, minimumSpeed];
+    const inputs = [minimumPlayers, cactusCount, wormholePairs, cactusRelocateMinutes, wormholeRelocateMinutes, worldSize, baseSpeed, speedDivisor, minimumSpeed];
     let isDirty = false;
     let isSaving = false;
 
@@ -221,6 +236,9 @@
       minimumPlayers.value = config.minimumPlayers;
       cactusCount.value = config.cactusCount;
       wormholePairs.value = config.wormholePairs;
+      cactusRelocateMinutes.value = Math.floor((config.cactusRelocateSeconds || 0) / 60);
+      wormholeRelocateMinutes.value = Math.floor((config.wormholeRelocateSeconds || 0) / 60);
+      worldSize.value = config.worldSize;
       baseSpeed.value = config.baseSpeed;
       speedDivisor.value = config.speedDivisor;
       minimumSpeed.value = config.minimumSpeed;
@@ -273,6 +291,9 @@
           minimumPlayers: Number(minimumPlayers.value),
           cactusCount: Number(cactusCount.value),
           wormholePairs: Number(wormholePairs.value),
+          cactusRelocateSeconds: Number(cactusRelocateMinutes.value) * 60,
+          wormholeRelocateSeconds: Number(wormholeRelocateMinutes.value) * 60,
+          worldSize: Number(worldSize.value),
           baseSpeed: Number(baseSpeed.value),
           speedDivisor: Number(speedDivisor.value),
           minimumSpeed: Number(minimumSpeed.value),

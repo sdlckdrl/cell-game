@@ -27,6 +27,7 @@ const touchSplit = document.getElementById("touchSplit");
 const fullscreenPrompt = document.getElementById("fullscreenPrompt");
 const fullscreenAccept = document.getElementById("fullscreenAccept");
 const fullscreenDismiss = document.getElementById("fullscreenDismiss");
+const resetNotice = document.getElementById("resetNotice");
 const messageBox = document.getElementById("message");
 const hudName = document.getElementById("hudName");
 const hudCellType = document.getElementById("hudCellType");
@@ -95,6 +96,7 @@ const world = {
 };
 
 const FULLSCREEN_PROMPT_KEY = "cellgame-mobile-fullscreen-prompt";
+const RESET_WARNING_WINDOW_MS = 5 * 60 * 1000;
 
 const state = {
   playerId: null,
@@ -111,6 +113,7 @@ const state = {
   camera: { x: 0, y: 0 },
   lastFrame: 0,
   connected: false,
+  resetAt: 0,
   messageTimer: 0,
   pendingDirection: { x: 0, y: 0 },
   socket: null,
@@ -356,6 +359,7 @@ function connectSocket() {
       state.foods = data.foods;
       state.cacti = data.cacti || [];
       state.wormholes = data.wormholes || [];
+      state.resetAt = Number(data.resetAt) || 0;
       syncRenderPlayers(data.players, snapshotAt);
       const me = state.renderPlayers.get(state.playerId);
       const grouped = state.leaderboard.length > 0 ? state.leaderboard : aggregateOwners(data.players);
@@ -444,6 +448,7 @@ function loop(timestamp) {
   stepRenderPlayers(dt, timestamp);
   updateCamera();
   render();
+  renderResetNotice();
 
   if (state.messageTimer > 0) {
     state.messageTimer -= dt;
@@ -1098,6 +1103,29 @@ function hideFullscreenPrompt() {
     return;
   }
   fullscreenPrompt.classList.add("hidden");
+}
+
+function renderResetNotice() {
+  if (!resetNotice) {
+    return;
+  }
+  const resetAt = Number(state.resetAt);
+  if (!Number.isFinite(resetAt) || resetAt <= 0) {
+    resetNotice.classList.add("hidden");
+    return;
+  }
+
+  const remainingMs = resetAt - Date.now();
+  if (remainingMs > RESET_WARNING_WINDOW_MS || remainingMs <= 0) {
+    resetNotice.classList.add("hidden");
+    return;
+  }
+
+  const totalSeconds = Math.ceil(remainingMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  resetNotice.textContent = `초기화까지 ${minutes}:${String(seconds).padStart(2, "0")}`;
+  resetNotice.classList.remove("hidden");
 }
 
 function isFullscreenActive() {

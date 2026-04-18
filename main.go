@@ -48,6 +48,8 @@ const (
 	probioticShieldDuration = 10 * time.Second
 	probioticSpeedDuration  = 18 * time.Second
 	probioticSpeedBoost     = 1.32
+	worldResetInterval      = 30 * time.Minute
+	worldResetWarningWindow = 5 * time.Minute
 	dividerSplitCooldown  = 1400 * time.Millisecond
 	dividerMergeDelay     = 7 * time.Second
 	dividerMinSplitMass   = 40.0
@@ -80,6 +82,7 @@ type gameState struct {
 	lastCactusRelocation   time.Time
 	lastWormholeRelocation time.Time
 	lastProbioticSpawn     time.Time
+	nextWorldResetAt       time.Time
 }
 
 type runtimeConfig struct {
@@ -194,6 +197,7 @@ type snapshotMessage struct {
 	Leaderboard []ownerSummary `json:"leaderboard"`
 	Chats       []chatEntry    `json:"chats"`
 	Config      runtimeConfig  `json:"config"`
+	ResetAt     int64          `json:"resetAt"`
 }
 
 type ownerSummary struct {
@@ -305,6 +309,7 @@ func main() {
 		lastCactusRelocation:   time.Now(),
 		lastWormholeRelocation: time.Now(),
 		lastProbioticSpawn:     time.Now(),
+		nextWorldResetAt:       nextWorldResetTime(time.Now()),
 	}
 	state.seedFoods()
 	state.seedCacti()
@@ -673,6 +678,13 @@ func (s *gameState) updateWorld() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	if s.nextWorldResetAt.IsZero() {
+		s.nextWorldResetAt = nextWorldResetTime(now)
+	}
+	if !now.Before(s.nextWorldResetAt) {
+		s.resetWorldLocked(now)
+		s.nextWorldResetAt = nextWorldResetTime(now.Add(time.Second))
+	}
 	s.maybeRelocateHazardsLocked(now)
 	s.maybeSpawnProbioticsLocked(now)
 	worldSize := s.worldSize()
@@ -776,6 +788,53 @@ func (s *gameState) updateWorld() {
 	s.resolvePlayerEating()
 	s.resolveOwnedMergesLocked(now)
 	s.topUpFoods()
+}
+
+func nextWorldResetTime(now time.Time) time.Time {
+	base := now.Truncate(worldResetInterval)
+	next := base.Add(worldResetInterval)
+	if !next.After(now) {
+		next = next.Add(worldResetInterval)
+	}
+	return next
+}
+
+func (s *gameState) resetWorldLocked(now time.Time) {
+	owners := make(map[string]*player)
+	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+
+		current, exists := owners[ownerID]
+		if !exists || (current.SessionID == "" && p.SessionID != "") || p.Mass > current.Mass {
+			owners[ownerID] = p
+		}
+	}
+
+	for ownerID, keep := range owners {
+		for _, fragment := range s.ownedPlayersLocked(ownerID) {
+			if fragment.ID != keep.ID {
+				delete(s.players, fragment.ID)
+			}
+		}
+		respawnPlayer(keep, s.worldSize())
+		keep.LastSeen = now
+		if keep.IsBot {
+			keep.NextBotThinkAt = now
+		}
+	}
+
+	s.foods = s.foods[:0]
+	s.cacti = s.cacti[:0]
+	s.wormholes = s.wormholes[:0]
+	s.seedFoods()
+	s.reconcileCactiLocked()
+	s.reconcileWormholesLocked()
+	s.lastCactusRelocation = now
+	s.lastWormholeRelocation = now
+	s.lastProbioticSpawn = now
 }
 
 func (s *gameState) resolvePlayerEating() {
@@ -926,6 +985,7 @@ func (s *gameState) broadcastSnapshot() {
 	var targets []snapshotTarget
 	chats := cloneChats(s.chats)
 	config := s.config
+	resetAt := s.nextWorldResetAt.UnixMilli()
 
 	// 3. 접속 중인 유저별로 타겟 페이로드 생성
 	for _, viewer := range s.players {
@@ -1005,6 +1065,7 @@ func (s *gameState) broadcastSnapshot() {
 				Leaderboard: leaderboard,
 				Chats:       chats,
 				Config:      config,
+				ResetAt:     resetAt,
 			},
 		})
 	}
@@ -1085,6 +1146,7 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 	leaderboard := buildOwnerLeaderboard(s.players)
 	chats := cloneChats(s.chats)
 	config := s.config
+	resetAt := s.nextWorldResetAt.UnixMilli()
 	s.mu.RUnlock()
 
 	return json.Marshal(snapshotMessage{
@@ -1096,6 +1158,7 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 		Leaderboard: leaderboard,
 		Chats:       chats,
 		Config:      config,
+		ResetAt:     resetAt,
 	})
 }
 
@@ -2285,7 +2348,10 @@ func effectiveCombatMass(p *player) float64 {
 }
 
 func canEatPlayer(attacker, defender *player, gap float64) bool {
-	if gap >= currentRadius(attacker) {
+	attackerRadius := currentRadius(attacker)
+	defenderRadius := currentRadius(defender)
+	requiredCenterDepth := attackerRadius - defenderRadius*0.5
+	if gap > requiredCenterDepth {
 		return false
 	}
 
@@ -2590,7 +2656,7 @@ func newBotPlayer(index int, usedNicknames map[string]struct{}, worldSize float6
 		ID:             id,
 		SessionID:      "",
 		OwnerID:        id,
-		Nickname:       randomBotNickname(index, usedNicknames),
+		Nickname:       randomPreferredBotNickname(index, usedNicknames),
 		CellType:       cellType,
 		Ability:        abilityName(cellType),
 		X:              spawnCoordinate(worldSize, 400),
@@ -2609,6 +2675,47 @@ func newBotPlayer(index int, usedNicknames map[string]struct{}, worldSize float6
 func randomBotCellType() string {
 	cellTypes := []string{"classic", "blink", "giant", "shield", "magnet", "divider"}
 	return cellTypes[mathrand.Intn(len(cellTypes))]
+}
+
+func randomPreferredBotNickname(index int, usedNicknames map[string]struct{}) string {
+	englishFirst := []string{"Nova", "Lumi", "Aero", "Milo", "Rin", "Nex", "Sora", "Kai", "Yuna", "Theo", "Lyn", "Iris"}
+	englishLast := []string{"Fox", "Ray", "Bit", "Run", "Pulse", "Mint", "Zero", "Core", "Dash", "Pop", "Wave", "Byte"}
+	korean := []string{
+		"하린", "도윤", "서윤", "민준", "예준", "지우", "시아", "서진", "준호", "유나",
+		"수아", "지안", "연우", "하율", "은호", "시우", "채원", "지호", "주원", "하람",
+		"다온", "태오", "이안", "나린", "아린", "가온", "라온", "유진", "서아", "하은",
+		"로아", "지유", "도하", "시온", "민서", "예린", "태린", "하진", "윤서", "규리",
+		"다인", "선우", "도현", "세아", "현우", "다윤", "주하", "윤아", "예담", "하민",
+	}
+
+	for attempt := 0; attempt < 96; attempt++ {
+		var candidate string
+		switch mathrand.Intn(4) {
+		case 0, 1:
+			name := korean[mathrand.Intn(len(korean))]
+			if mathrand.Float64() < 0.42 {
+				candidate = fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+			} else {
+				candidate = name
+			}
+		case 2:
+			nameA := korean[mathrand.Intn(len(korean))]
+			nameB := korean[mathrand.Intn(len(korean))]
+			candidate = nameA + nameB
+		default:
+			if mathrand.Float64() < 0.45 {
+				candidate = fmt.Sprintf("%s%d", englishFirst[mathrand.Intn(len(englishFirst))], 10+((index+mathrand.Intn(70))%90))
+			} else {
+				candidate = englishFirst[mathrand.Intn(len(englishFirst))] + englishLast[mathrand.Intn(len(englishLast))]
+			}
+		}
+
+		if _, exists := usedNicknames[candidate]; !exists {
+			return candidate
+		}
+	}
+
+	return fmt.Sprintf("Bot-%03d", index)
 }
 
 func randomBotNickname(index int, usedNicknames map[string]struct{}) string {

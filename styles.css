@@ -60,6 +60,38 @@ input {
   backdrop-filter: blur(8px);
 }
 
+.rotate-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  pointer-events: none;
+}
+
+.rotate-card {
+  width: min(340px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(9, 18, 34, 0.88);
+  border: 1px solid var(--line);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+  text-align: center;
+}
+
+.rotate-card strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.rotate-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.4;
+  font-size: 0.92rem;
+}
+
 .fullscreen-card {
   width: min(440px, calc(100vw - 32px));
   padding: 24px;
@@ -102,6 +134,7 @@ input {
 
 .panel,
 .hud-card,
+.upgrade-panel,
 .leaderboard,
 .message,
 .chat-panel,
@@ -244,7 +277,38 @@ input {
   flex-wrap: wrap;
 }
 
+.upgrade-panel {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 3;
+  width: min(320px, calc(100vw - 36px));
+  display: grid;
+  gap: 10px;
+}
+
+.upgrade-toggle {
+  justify-self: start;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(12, 24, 42, 0.92);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.upgrade-content {
+  display: grid;
+  gap: 12px;
+}
+
+.upgrade-panel:not(.open) {
+  width: auto;
+}
+
 .hud-card,
+.upgrade-panel,
 .leaderboard,
 .message,
 .chat-panel,
@@ -267,6 +331,73 @@ input {
   border-color: rgba(167, 212, 255, 0.12);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
   pointer-events: none;
+}
+
+.upgrade-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.upgrade-head span {
+  color: var(--muted);
+}
+
+#upgradeCoins {
+  color: #ffd75a;
+  text-shadow: 0 0 14px rgba(255, 212, 90, 0.2);
+}
+
+.upgrade-body {
+  display: grid;
+  gap: 6px;
+}
+
+.upgrade-name {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.upgrade-description {
+  color: var(--muted);
+  line-height: 1.45;
+  font-size: 0.92rem;
+}
+
+.upgrade-buy {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 0;
+  background: linear-gradient(135deg, #8affcf, #60b9ff);
+  color: #03101c;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.upgrade-buy:disabled {
+  cursor: default;
+  opacity: 0.56;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.upgrade-panel.available .upgrade-toggle,
+.upgrade-panel.available #upgradeCoins {
+  animation: upgradePulse 1.45s ease-in-out infinite;
+}
+
+@keyframes upgradePulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(255, 214, 92, 0);
+    text-shadow: 0 0 14px rgba(255, 212, 90, 0.2);
+  }
+  50% {
+    transform: scale(1.03);
+    box-shadow: 0 0 20px rgba(255, 214, 92, 0.18);
+    text-shadow: 0 0 18px rgba(255, 222, 120, 0.45);
+  }
 }
 
 .hud-line,
@@ -309,6 +440,13 @@ input {
   background: linear-gradient(90deg, #ffcf70, #ffdca6);
 }
 
+.hud-controls {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .leaderboard {
   width: min(280px, calc(100vw - 36px));
   z-index: 3;
@@ -346,6 +484,37 @@ body.touch-device .hud {
   top: 10px;
   left: 10px;
   gap: 0;
+}
+
+body.touch-device .upgrade-panel {
+  left: 10px;
+  bottom: 116px;
+  width: min(240px, calc(100vw - 132px));
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+body.touch-device .upgrade-panel:not(.open) {
+  width: auto;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+body.touch-device .upgrade-toggle {
+  padding: 9px 12px;
+  font-size: 0.84rem;
+}
+
+body.touch-device .upgrade-description {
+  font-size: 0.82rem;
+}
+
+body.touch-device .upgrade-buy {
+  padding: 10px 12px;
+  font-size: 0.86rem;
 }
 
 body.touch-device .hud-summary {
@@ -386,6 +555,10 @@ body.touch-device .hud-ability .meter {
 body.touch-device .hud-ability #hudAbilityName {
   font-size: 0.88rem;
   letter-spacing: 0.01em;
+}
+
+body.touch-device .hud-controls {
+  display: none;
 }
 
 body.touch-device .right-sidebar {
@@ -686,8 +859,8 @@ body.touch-device .touch-controls {
   position: absolute;
   right: 16px;
   bottom: 34px;
-  width: 150px;
-  height: 170px;
+  width: 184px;
+  height: 196px;
   pointer-events: none;
 }
 
@@ -716,8 +889,13 @@ body.touch-device .touch-controls {
   top: 0;
 }
 
+.touch-actions .touch-button.merge {
+  right: 86px;
+  top: 22px;
+}
+
 .touch-actions .touch-button.split {
-  right: 64px;
+  right: 28px;
   bottom: -14px;
 }
 
@@ -739,6 +917,12 @@ body.touch-device .touch-controls {
 .touch-button.split {
   background:
     radial-gradient(circle at 30% 30%, rgba(255,207,112,0.08), rgba(8, 18, 34, 0.02) 60%),
+    rgba(8, 18, 34, 0.04);
+}
+
+.touch-button.merge {
+  background:
+    radial-gradient(circle at 30% 30%, rgba(193,166,255,0.1), rgba(8, 18, 34, 0.02) 60%),
     rgba(8, 18, 34, 0.04);
 }
 
@@ -767,7 +951,19 @@ body.touch-device .touch-controls {
   }
 
   .cell-options {
-    grid-template-columns: 1fr;
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 8px;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .cell-option {
+    min-width: min(76vw, 320px);
+    flex: 0 0 auto;
+    scroll-snap-align: start;
   }
 
   .leaderboard {

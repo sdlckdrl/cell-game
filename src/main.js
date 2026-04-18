@@ -23,10 +23,12 @@ const touchControls = document.getElementById("touchControls");
 const touchPad = document.getElementById("touchPad");
 const touchStick = document.getElementById("touchStick");
 const touchAbility = document.getElementById("touchAbility");
+const touchMerge = document.getElementById("touchMerge");
 const touchSplit = document.getElementById("touchSplit");
 const fullscreenPrompt = document.getElementById("fullscreenPrompt");
 const fullscreenAccept = document.getElementById("fullscreenAccept");
 const fullscreenDismiss = document.getElementById("fullscreenDismiss");
+const rotatePrompt = document.getElementById("rotatePrompt");
 const resetNotice = document.getElementById("resetNotice");
 const messageBox = document.getElementById("message");
 const hudName = document.getElementById("hudName");
@@ -38,6 +40,14 @@ const hudCooldownLabel = document.getElementById("hudCooldownLabel");
 const hudCooldownFill = document.getElementById("hudCooldownFill");
 const hudEffectLabel = document.getElementById("hudEffectLabel");
 const hudEffectFill = document.getElementById("hudEffectFill");
+const hudControls = document.getElementById("hudControls");
+const upgradePanel = document.getElementById("upgradePanel");
+const upgradeToggle = document.getElementById("upgradeToggle");
+const upgradeContent = document.getElementById("upgradeContent");
+const upgradeCoins = document.getElementById("upgradeCoins");
+const upgradeName = document.getElementById("upgradeName");
+const upgradeDescription = document.getElementById("upgradeDescription");
+const upgradeBuy = document.getElementById("upgradeBuy");
 
 const CELL_TYPES = {
   classic: {
@@ -90,12 +100,21 @@ const CELL_TYPES = {
   },
 };
 
+const UPGRADE_COST = 12;
+const UPGRADE_DEFS = {
+  classic: { name: "코어 과부하", description: "가속 에너지 탱크가 커져 더 오래 빠르게 달릴 수 있습니다." },
+  blink: { name: "장거리 도약", description: "순간이동 거리가 더 길어집니다." },
+  giant: { name: "돌진 거대화", description: "거대화 중에도 작은 적을 공격할 수 있습니다." },
+  shield: { name: "강화 보호막", description: "보호막 지속 시간이 더 길어집니다." },
+  magnet: { name: "중력 흡인", description: "10초 동안 작은 적까지 서서히 끌어당깁니다." },
+  divider: { name: "즉시 재결합", description: "원할 때 언제든 다시 합쳐질 수 있습니다." },
+};
+
 const world = {
   width: 3600,
   height: 3600,
 };
 
-const FULLSCREEN_PROMPT_KEY = "cellgame-mobile-fullscreen-prompt";
 const RESET_WARNING_WINDOW_MS = 5 * 60 * 1000;
 
 const state = {
@@ -121,6 +140,8 @@ const state = {
   selectedCellType: "classic",
   abilityPressed: false,
   splitPressed: false,
+  mergePressed: false,
+  upgradePanelOpen: false,
   zoom: 1,
   zoomTarget: 1,
   zoomReturnAt: 0,
@@ -155,11 +176,14 @@ if (state.isTouchDevice) {
   document.body.classList.add("touch-device");
   state.leaderboardCollapsed = true;
   maybeShowFullscreenPrompt();
+  updateRotatePrompt();
 }
 
 window.addEventListener("resize", resizeCanvas);
+window.addEventListener("orientationchange", updateRotatePrompt);
 window.addEventListener("keydown", (event) => {
-  if (isTypingInField()) {
+  const isChatTyping = document.activeElement === chatInput;
+  if (isTypingInField() && !(event.code === "Enter" && isChatTyping)) {
     return;
   }
   if (event.code === "Space") { // 꾹 누를 때 연속 입력 허용
@@ -168,8 +192,20 @@ window.addEventListener("keydown", (event) => {
   if (event.code === "KeyW" && !event.repeat) {
     state.splitPressed = true;
   }
+  if (event.code === "KeyE" && !event.repeat) {
+    state.mergePressed = true;
+  }
   if (event.code === "Enter" && state.connected) {
     event.preventDefault();
+    if (isChatTyping && !chatInput.value.trim()) {
+      setChatCollapsed(true);
+      chatInput.blur();
+      return;
+    }
+    if (isChatTyping) {
+      sendChat();
+      return;
+    }
     if (state.chatCollapsed) {
       setChatCollapsed(false);
     }
@@ -237,17 +273,22 @@ touchSplit.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   state.splitPressed = true;
 });
+touchMerge.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  state.mergePressed = true;
+});
+touchMerge.textContent = "합체";
 touchSplit.textContent = "W";
 fullscreenAccept.addEventListener("click", async () => {
-  localStorage.setItem(FULLSCREEN_PROMPT_KEY, "accepted");
   hideFullscreenPrompt();
   const entered = await requestMobileFullscreen();
   if (!entered) {
     showMessage("브라우저에서 전체화면 전환이 제한되었습니다.");
   }
+  await lockLandscapeOrientation();
+  updateRotatePrompt();
 });
 fullscreenDismiss.addEventListener("click", () => {
-  localStorage.setItem(FULLSCREEN_PROMPT_KEY, "dismissed");
   hideFullscreenPrompt();
 });
 minimapToggle.addEventListener("click", () => {
@@ -261,6 +302,13 @@ leaderboardToggle.addEventListener("click", () => {
   leaderboard.classList.toggle("collapsed", state.leaderboardCollapsed);
   leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
   leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
+});
+upgradeBuy.addEventListener("click", () => {
+  sendUpgradePurchase();
+});
+upgradeToggle.addEventListener("click", () => {
+  state.upgradePanelOpen = !state.upgradePanelOpen;
+  syncUpgradePanelState();
 });
 chatToggle.addEventListener("click", () => {
   setChatCollapsed(!state.chatCollapsed);
@@ -299,6 +347,9 @@ loginForm.addEventListener("submit", async (event) => {
     const selected = CELL_TYPES[data.cellType] || CELL_TYPES.classic;
     hudCellType.textContent = selected.name;
     hudAbilityName.textContent = selected.abilityName;
+    if (state.isTouchDevice && !isFullscreenActive()) {
+      maybeShowFullscreenPrompt();
+    }
     connectSocket();
   } catch {
     showMessage("서버 연결에 실패했습니다.");
@@ -414,8 +465,10 @@ function sendInput() {
     direction: state.pendingDirection,
     useAbility: state.abilityPressed,
     useSplit: state.splitPressed,
+    useMerge: state.mergePressed,
   }));
   state.splitPressed = false;
+  state.mergePressed = false;
 }
 
 function sendChat() {
@@ -435,6 +488,17 @@ function sendChat() {
   }
 }
 
+function sendUpgradePurchase() {
+  const me = getOwnedRepresentativePlayer();
+  if (!me || !state.connected || !state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  state.socket.send(JSON.stringify({
+    type: "upgrade",
+    upgrade: me.cellType,
+  }));
+}
+
 function loop(timestamp) {
   const dt = Math.min(0.033, (timestamp - state.lastFrame) / 1000 || 0.016);
   state.lastFrame = timestamp;
@@ -449,6 +513,8 @@ function loop(timestamp) {
   updateCamera();
   render();
   renderResetNotice();
+  renderUpgradePanel();
+  renderControlHints();
 
   if (state.messageTimer > 0) {
     state.messageTimer -= dt;
@@ -495,6 +561,8 @@ function syncRenderPlayers(nextPlayers, snapshotAt) {
       existing.effectRemaining = player.effectRemaining;
       existing.scale = player.scale;
       existing.isBot = player.isBot;
+      existing.coins = player.coins || 0;
+      existing.upgrades = player.upgrades || {};
     } else {
       state.renderPlayers.set(player.id, {
         ...player,
@@ -511,6 +579,8 @@ function syncRenderPlayers(nextPlayers, snapshotAt) {
         snapshotGap: state.snapshotGap,
         velocityX: 0,
         velocityY: 0,
+        coins: player.coins || 0,
+        upgrades: player.upgrades || {},
       });
     }
   }
@@ -1091,8 +1161,7 @@ function maybeShowFullscreenPrompt() {
   if (!state.isTouchDevice || !fullscreenPrompt) {
     return;
   }
-  const choice = localStorage.getItem(FULLSCREEN_PROMPT_KEY);
-  if (choice || isFullscreenActive()) {
+  if (isFullscreenActive()) {
     return;
   }
   fullscreenPrompt.classList.remove("hidden");
@@ -1128,6 +1197,100 @@ function renderResetNotice() {
   resetNotice.classList.remove("hidden");
 }
 
+function renderUpgradePanel() {
+  if (!upgradePanel) {
+    return;
+  }
+  const me = getOwnedRepresentativePlayer();
+  if (!me) {
+    upgradePanel.classList.add("hidden");
+    return;
+  }
+
+  const definition = UPGRADE_DEFS[me.cellType];
+  if (!definition) {
+    upgradePanel.classList.add("hidden");
+    return;
+  }
+
+  const upgrades = me.upgrades || {};
+  const owned = !!upgrades[me.cellType];
+  const coins = Number(me.coins) || 0;
+  const available = !owned && coins >= UPGRADE_COST;
+  upgradeCoins.textContent = `${coins}코인`;
+  upgradeName.textContent = definition.name;
+  upgradeDescription.textContent = owned
+    ? "구매 완료. 현재 세포 전용 업그레이드가 적용 중입니다."
+    : `${definition.description} (${UPGRADE_COST}코인)`;
+  upgradeBuy.disabled = !available;
+  upgradeBuy.textContent = owned ? "구매 완료" : coins < UPGRADE_COST ? `${UPGRADE_COST}코인 필요` : "업그레이드 구매";
+  upgradePanel.classList.toggle("available", available);
+  upgradePanel.classList.remove("hidden");
+  syncUpgradePanelState();
+}
+
+function syncUpgradePanelState() {
+  if (!upgradeContent || !upgradeToggle) {
+    return;
+  }
+  upgradeContent.classList.toggle("hidden", !state.upgradePanelOpen);
+  upgradePanel.classList.toggle("open", state.upgradePanelOpen);
+  upgradeToggle.setAttribute("aria-expanded", String(state.upgradePanelOpen));
+  upgradeToggle.textContent = state.upgradePanelOpen ? "업그레이드 닫기" : "업그레이드 열기";
+}
+
+function getOwnedRepresentativePlayer() {
+  const ownerId = getMyOwnerId();
+  let best = null;
+  for (const player of state.renderPlayers.values()) {
+    if ((player.ownerId || player.id) !== ownerId) {
+      continue;
+    }
+    if (!best || player.mass > best.mass) {
+      best = player;
+    }
+  }
+  return best;
+}
+
+function getOwnedFragmentCount() {
+  const ownerId = getMyOwnerId();
+  let count = 0;
+  for (const player of state.renderPlayers.values()) {
+    if ((player.ownerId || player.id) === ownerId) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function renderControlHints() {
+  const me = getOwnedRepresentativePlayer();
+  if (!me) {
+    if (touchMerge) {
+      touchMerge.classList.add("hidden");
+    }
+    return;
+  }
+
+  const fragmentCount = getOwnedFragmentCount();
+  const canManualMerge = me.cellType === "divider" && !!(me.upgrades || {}).divider && fragmentCount > 1;
+
+  if (touchMerge) {
+    touchMerge.classList.toggle("hidden", !canManualMerge);
+  }
+
+  if (!hudControls) {
+    return;
+  }
+
+  const parts = ["Space 전용기", "W 배출"];
+  if (canManualMerge) {
+    parts.push("E 합체");
+  }
+  hudControls.textContent = `키 안내: ${parts.join(" / ")}`;
+}
+
 function isFullscreenActive() {
   return !!(
     document.fullscreenElement ||
@@ -1155,6 +1318,26 @@ async function requestMobileFullscreen() {
     return false;
   }
   return false;
+}
+
+async function lockLandscapeOrientation() {
+  try {
+    if (screen.orientation?.lock) {
+      await screen.orientation.lock("landscape");
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function updateRotatePrompt() {
+  if (!rotatePrompt || !state.isTouchDevice) {
+    return;
+  }
+  const isPortrait = window.innerHeight > window.innerWidth;
+  rotatePrompt.classList.toggle("hidden", !isPortrait);
 }
 
 function escapeHtml(value) {

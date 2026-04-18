@@ -50,6 +50,7 @@ const (
 	probioticSpeedBoost     = 1.32
 	worldResetInterval      = 30 * time.Minute
 	worldResetWarningWindow = 5 * time.Minute
+	upgradeCost             = 12
 	dividerSplitCooldown  = 1400 * time.Millisecond
 	dividerMergeDelay     = 7 * time.Second
 	dividerMinSplitMass   = 40.0
@@ -111,6 +112,8 @@ type player struct {
 	Scale             float64   `json:"scale"`
 	Color             string    `json:"color"`
 	IsBot             bool      `json:"isBot"`
+	Coins             int       `json:"coins"`
+	Upgrades          upgradeState `json:"upgrades"`
 	Direction         direction `json:"-"`
 	CooldownRemaining int64     `json:"cooldownRemaining"`
 	EffectRemaining   int64     `json:"effectRemaining"`
@@ -132,6 +135,15 @@ type player struct {
 type direction struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
+}
+
+type upgradeState struct {
+	Classic bool `json:"classic"`
+	Blink   bool `json:"blink"`
+	Giant   bool `json:"giant"`
+	Shield  bool `json:"shield"`
+	Magnet  bool `json:"magnet"`
+	Divider bool `json:"divider"`
 }
 
 type food struct {
@@ -185,7 +197,9 @@ type inputMessage struct {
 	Direction  direction `json:"direction"`
 	UseAbility bool      `json:"useAbility"`
 	UseSplit   bool      `json:"useSplit"`
+	UseMerge   bool      `json:"useMerge"`
 	Message    string    `json:"message,omitempty"`
+	Upgrade    string    `json:"upgrade,omitempty"`
 }
 
 type snapshotMessage struct {
@@ -597,6 +611,14 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 			s.handleChatMessage(playerID, ws, msg.Message)
 			continue
 		}
+		if msg.Type == "upgrade" {
+			s.mu.Lock()
+			if p, ok := s.players[playerID]; ok && p.Conn == ws {
+				s.handleUpgradePurchaseLocked(p, msg.Upgrade)
+			}
+			s.mu.Unlock()
+			continue
+		}
 		if msg.Type != "input" {
 			continue
 		}
@@ -621,6 +643,9 @@ func (s *gameState) readLoop(playerID string, ws *wsConn) {
 				for _, fragment := range s.ownedPlayersLocked(ownerID) {
 					s.trySplit(fragment)
 				}
+			}
+			if msg.UseMerge {
+				s.tryUpgradeMergeLocked(p)
 			}
 		}
 		s.mu.Unlock()
@@ -712,6 +737,7 @@ func (s *gameState) updateWorld() {
 
 		speed := s.movementSpeed(p.Mass)
 		scaleMultiplier := 1.0
+		upgraded := upgradeEnabledForCellType(p.Upgrades, p.CellType)
 		if now.Before(p.ProbioticUntil) {
 			scaleMultiplier *= 2
 		}
@@ -723,8 +749,16 @@ func (s *gameState) updateWorld() {
 			speed *= 0.68
 			scaleMultiplier *= 1.9
 		case p.CellType == "classic": // ✅ 오버클럭 에너지 제어 로직
-			depleteRate := 4000.0 / (1.5 * tickRate)  // 1.5초 만에 방전
-			rechargeRate := 4000.0 / (4.0 * tickRate) // 4초 만에 완충
+			maxEnergy := 4000.0
+			activeDuration := 1.5
+			rechargeDuration := 4.0
+			if upgraded {
+				maxEnergy = 6200.0
+				activeDuration = 2.6
+				rechargeDuration = 4.6
+			}
+			depleteRate := maxEnergy / (activeDuration * tickRate)
+			rechargeRate := maxEnergy / (rechargeDuration * tickRate)
 
 			if p.IsAbilityActive {
 				if p.Energy > 0 {
@@ -737,8 +771,8 @@ func (s *gameState) updateWorld() {
 				}
 			} else {
 				p.Energy += rechargeRate
-				if p.Energy > 4000 {
-					p.Energy = 4000
+				if p.Energy > maxEnergy {
+					p.Energy = maxEnergy
 				}
 			}
 		}
@@ -748,6 +782,9 @@ func (s *gameState) updateWorld() {
 		p.Y = clamp(p.Y+p.Direction.Y*speed/tickRate, effectiveRadius, worldSize-effectiveRadius)
 		if p.CellType == "magnet" && now.Before(p.EffectUntil) {
 			s.pullNearbyFoodLocked(p, 220)
+			if upgraded {
+				s.pullSmallerPlayersLocked(p, 280)
+			}
 		}
 		s.applyWormholeForceLocked(p, now)
 		s.resolveCactusHitLocked(p, now)
@@ -819,6 +856,8 @@ func (s *gameState) resetWorldLocked(now time.Time) {
 				delete(s.players, fragment.ID)
 			}
 		}
+		keep.Coins = 0
+		keep.Upgrades = upgradeState{}
 		respawnPlayer(keep, s.worldSize())
 		keep.LastSeen = now
 		if keep.IsBot {
@@ -870,11 +909,21 @@ func (s *gameState) resolvePlayerEating() {
 				// A가 B를 포식
 				a.Mass += b.Mass * 0.85
 				a.Radius = massToRadius(a.Mass)
+				attackerOwnerID := a.OwnerID
+				if attackerOwnerID == "" {
+					attackerOwnerID = a.ID
+				}
+				s.awardCoinsLocked(attackerOwnerID, int(math.Max(1, math.Round(b.Mass/42))))
 				s.handleConsumedPlayerLocked(b)
 			} else if canEatPlayer(b, a, gap) {
 				// B가 A를 포식
 				b.Mass += a.Mass * 0.85
 				b.Radius = massToRadius(b.Mass)
+				attackerOwnerID := b.OwnerID
+				if attackerOwnerID == "" {
+					attackerOwnerID = b.ID
+				}
+				s.awardCoinsLocked(attackerOwnerID, int(math.Max(1, math.Round(a.Mass/42))))
 				s.handleConsumedPlayerLocked(a)
 			} else {
 				// 포식 관계가 성립하지 않을 때 (비슷한 크기이거나, 무적 상태 등)
@@ -1627,6 +1676,8 @@ func clonePlayer(p *player) *player {
 		Scale:             p.Scale,
 		Color:             p.Color,
 		IsBot:             p.IsBot,
+		Coins:             p.Coins,
+		Upgrades:          p.Upgrades,
 		CooldownRemaining: cooldownRemainingMs, // ✅ 수정된 변수 적용
 		EffectRemaining:   effectRemainingMs,   // ✅ 수정된 변수 적용
 	}
@@ -1695,6 +1746,8 @@ func (s *gameState) handleConsumedPlayerLocked(victim *player) {
 	victim.Radius = successor.Radius
 	victim.Scale = successor.Scale
 	victim.Direction = successor.Direction
+	victim.Coins = successor.Coins
+	victim.Upgrades = successor.Upgrades
 	victim.CooldownUntil = successor.CooldownUntil
 	victim.EffectUntil = successor.EffectUntil
 	victim.ProbioticUntil = successor.ProbioticUntil
@@ -1953,6 +2006,14 @@ func (s *gameState) mergeOwnedPairLocked(ownerID string, a, b *player) {
 	delete(s.players, source.ID)
 }
 
+func (s *gameState) forceMergeOwnerLocked(ownerID string) {
+	fragments := s.ownedPlayersLocked(ownerID)
+	for len(fragments) > 1 {
+		s.mergeOwnedPairLocked(ownerID, fragments[0], fragments[1])
+		fragments = s.ownedPlayersLocked(ownerID)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -2195,12 +2256,94 @@ func (s *gameState) clampWorldObjectsLocked() {
 	}
 }
 
+func upgradeEnabledForCellType(upgrades upgradeState, cellType string) bool {
+	switch cellType {
+	case "classic":
+		return upgrades.Classic
+	case "blink":
+		return upgrades.Blink
+	case "giant":
+		return upgrades.Giant
+	case "shield":
+		return upgrades.Shield
+	case "magnet":
+		return upgrades.Magnet
+	case "divider":
+		return upgrades.Divider
+	default:
+		return false
+	}
+}
+
+func setUpgradeForCellType(upgrades upgradeState, cellType string, enabled bool) upgradeState {
+	switch cellType {
+	case "classic":
+		upgrades.Classic = enabled
+	case "blink":
+		upgrades.Blink = enabled
+	case "giant":
+		upgrades.Giant = enabled
+	case "shield":
+		upgrades.Shield = enabled
+	case "magnet":
+		upgrades.Magnet = enabled
+	case "divider":
+		upgrades.Divider = enabled
+	}
+	return upgrades
+}
+
+func (s *gameState) ownerProgressLocked(ownerID string) (int, upgradeState) {
+	fragments := s.ownedPlayersLocked(ownerID)
+	if len(fragments) == 0 {
+		return 0, upgradeState{}
+	}
+	return fragments[0].Coins, fragments[0].Upgrades
+}
+
+func (s *gameState) syncOwnerProgressLocked(ownerID string, coins int, upgrades upgradeState) {
+	for _, fragment := range s.ownedPlayersLocked(ownerID) {
+		fragment.Coins = coins
+		fragment.Upgrades = upgrades
+	}
+}
+
+func (s *gameState) awardCoinsLocked(ownerID string, gain int) {
+	if gain <= 0 {
+		return
+	}
+	coins, upgrades := s.ownerProgressLocked(ownerID)
+	s.syncOwnerProgressLocked(ownerID, coins+gain, upgrades)
+}
+
+func (s *gameState) handleUpgradePurchaseLocked(p *player, requested string) bool {
+	if p == nil {
+		return false
+	}
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
+	cellType := sanitizeCellType(requested)
+	if cellType != p.CellType {
+		cellType = p.CellType
+	}
+	coins, upgrades := s.ownerProgressLocked(ownerID)
+	if upgradeEnabledForCellType(upgrades, cellType) || coins < upgradeCost {
+		return false
+	}
+	upgrades = setUpgradeForCellType(upgrades, cellType, true)
+	s.syncOwnerProgressLocked(ownerID, coins-upgradeCost, upgrades)
+	return true
+}
+
 func (s *gameState) tryUseAbility(p *player) {
 	now := time.Now()
 	worldSize := s.worldSize()
 	if now.Before(p.CooldownUntil) {
 		return
 	}
+	upgraded := upgradeEnabledForCellType(p.Upgrades, p.CellType)
 
 	switch p.CellType {
 	case "classic":
@@ -2208,6 +2351,9 @@ func (s *gameState) tryUseAbility(p *player) {
 		return
 	case "blink":
 		blinkDistance := 180.0
+		if upgraded {
+			blinkDistance = 340.0
+		}
 		length := math.Hypot(p.Direction.X, p.Direction.Y)
 		if length < 0.1 {
 			return
@@ -2216,19 +2362,42 @@ func (s *gameState) tryUseAbility(p *player) {
 		p.Y = clamp(p.Y+(p.Direction.Y/length)*blinkDistance, p.Radius, worldSize-p.Radius)
 		p.CooldownUntil = now.Add(6 * time.Second)
 	case "giant":
-		p.EffectUntil = now.Add(5 * time.Second)
+		duration := 5 * time.Second
+		p.EffectUntil = now.Add(duration)
 		p.CooldownUntil = now.Add(10 * time.Second)
 	case "shield":
-		p.EffectUntil = now.Add(3 * time.Second)
+		duration := 3 * time.Second
+		if upgraded {
+			duration = 5 * time.Second
+		}
+		p.EffectUntil = now.Add(duration)
 		p.CooldownUntil = now.Add(12 * time.Second)
 	case "magnet":
-		p.EffectUntil = now.Add(4 * time.Second)
+		duration := 4 * time.Second
+		if upgraded {
+			duration = 10 * time.Second
+		}
+		p.EffectUntil = now.Add(duration)
 		p.CooldownUntil = now.Add(9 * time.Second)
 	case "divider":
 		s.tryDividerAbilityLocked(p, now)
 	default:
 		p.CooldownUntil = now.Add(2 * time.Second)
 	}
+}
+
+func (s *gameState) tryUpgradeMergeLocked(p *player) {
+	if p == nil || p.CellType != "divider" || !p.Upgrades.Divider {
+		return
+	}
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
+	if len(s.ownedPlayersLocked(ownerID)) < 2 {
+		return
+	}
+	s.forceMergeOwnerLocked(ownerID)
 }
 
 func (s *gameState) trySplit(p *player) {
@@ -2315,6 +2484,8 @@ func (s *gameState) tryDividerAbilityLocked(p *player, now time.Time) {
 			LastSeen:       fragment.LastSeen,
 			NextBotThinkAt: fragment.NextBotThinkAt,
 			IsAbilityActive: fragment.IsAbilityActive,
+			Coins:          fragment.Coins,
+			Upgrades:       fragment.Upgrades,
 			ProbioticUntil: fragment.ProbioticUntil,
 			ShieldUntil:    fragment.ShieldUntil,
 			SpeedBoostUntil: fragment.SpeedBoostUntil,
@@ -2374,7 +2545,7 @@ func canEatPlayer(attacker, defender *player, gap float64) bool {
 		return false
 	}
 
-	if attacker.CellType == "giant" && time.Now().Before(attacker.EffectUntil) {
+	if attacker.CellType == "giant" && time.Now().Before(attacker.EffectUntil) && !attacker.Upgrades.Giant {
 		return false
 	}
 
@@ -2398,6 +2569,36 @@ func (s *gameState) pullNearbyFoodLocked(p *player, radius float64) {
 			f.VX += dirX * 22
 			f.VY += dirY * 22
 		}
+	}
+}
+
+func (s *gameState) pullSmallerPlayersLocked(p *player, radius float64) {
+	ownerID := p.OwnerID
+	if ownerID == "" {
+		ownerID = p.ID
+	}
+	worldSize := s.worldSize()
+	for _, other := range s.players {
+		otherOwnerID := other.OwnerID
+		if otherOwnerID == "" {
+			otherOwnerID = other.ID
+		}
+		if otherOwnerID == ownerID || other.CellType == "shield" && time.Now().Before(other.EffectUntil) || time.Now().Before(other.ShieldUntil) {
+			continue
+		}
+		if effectiveCombatMass(other) >= effectiveCombatMass(p)*0.92 {
+			continue
+		}
+		dist := distance(p.X, p.Y, other.X, other.Y)
+		if dist <= 0.001 || dist > radius {
+			continue
+		}
+		pull := (1 - dist/radius) * 28
+		dirX := (p.X - other.X) / dist
+		dirY := (p.Y - other.Y) / dist
+		other.Direction = direction{X: dirX * 0.45, Y: dirY * 0.45}
+		other.X = clamp(other.X+dirX*pull/tickRate, currentRadius(other), worldSize-currentRadius(other))
+		other.Y = clamp(other.Y+dirY*pull/tickRate, currentRadius(other), worldSize-currentRadius(other))
 	}
 }
 
@@ -2570,6 +2771,8 @@ func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction, now tim
 			LastSeen:         p.LastSeen,
 			NextBotThinkAt:   p.NextBotThinkAt,
 			IsAbilityActive:  false,
+			Coins:            p.Coins,
+			Upgrades:         p.Upgrades,
 			ProbioticUntil:   p.ProbioticUntil,
 			ShieldUntil:      p.ShieldUntil,
 			SpeedBoostUntil:  p.SpeedBoostUntil,

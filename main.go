@@ -2011,6 +2011,7 @@ func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction) {
 func (s *gameState) reconcileBotsLocked() {
 	humanOwners := make(map[string]bool)
 	botOwners := make(map[string]bool)
+	usedBotNicknames := make(map[string]struct{})
 	var botMains []*player
 
 	// 1. 조각이 아닌 '고유 소유자(본체)' 기준으로 인원수 계산
@@ -2021,6 +2022,7 @@ func (s *gameState) reconcileBotsLocked() {
 		}
 
 		if p.IsBot {
+			usedBotNicknames[p.Nickname] = struct{}{}
 			if !botOwners[ownerID] {
 				botOwners[ownerID] = true
 				botMains = append(botMains, p) // 삭제 기준이 될 대표 봇 1개만 수집
@@ -2063,13 +2065,14 @@ func (s *gameState) reconcileBotsLocked() {
 
 	// 3. 부족한 봇 보충
 	for len(botMains) < requiredBots {
-		bot := newBotPlayer(len(botMains) + 1)
+		bot := newBotPlayer(len(botMains)+1, usedBotNicknames)
 		s.players[bot.ID] = bot
 		botMains = append(botMains, bot)
+		usedBotNicknames[bot.Nickname] = struct{}{}
 	}
 }
 
-func newBotPlayer(index int) *player {
+func newBotPlayer(index int, usedNicknames map[string]struct{}) *player {
 	cellType := randomBotCellType()
 	now := time.Now()
 	mass := playerStartMass + mathrand.Float64()*18
@@ -2078,7 +2081,7 @@ func newBotPlayer(index int) *player {
 		ID:             id,
 		SessionID:      "",
 		OwnerID:        id,
-		Nickname:       randomBotNickname(index),
+		Nickname:       randomBotNickname(index, usedNicknames),
 		CellType:       cellType,
 		Ability:        abilityName(cellType),
 		X:              400 + mathrand.Float64()*(worldSize-800),
@@ -2099,38 +2102,51 @@ func randomBotCellType() string {
 	return cellTypes[mathrand.Intn(len(cellTypes))]
 }
 
-func randomBotNickname(index int) string {
+func randomBotNickname(index int, usedNicknames map[string]struct{}) string {
 	englishFirst := []string{"Nova", "Lumi", "Aero", "Milo", "Rin", "Nex", "Sora", "Kai", "Yuna", "Theo", "Lyn", "Iris"}
 	englishLast := []string{"Fox", "Ray", "Bit", "Run", "Pulse", "Mint", "Zero", "Core", "Dash", "Pop", "Wave", "Byte"}
 	korean := []string{"하루", "서준", "지안", "도윤", "민서", "유나", "시우", "은호", "나린", "태오", "하린", "수아"}
 	chinese := []string{"小龙", "雨晨", "子轩", "可欣", "星宇", "明哲", "安琪", "梓涵", "天佑", "欣怡", "浩然", "若曦"}
 	japanese := []string{"ハル", "ユイ", "ソラ", "レン", "ミオ", "アオイ", "リク", "ユナ", "ナギ", "カイ", "ヒナ", "サラ"}
 
-	switch mathrand.Intn(4) {
-	case 0:
-		if mathrand.Float64() < 0.45 {
-			return fmt.Sprintf("%s%d", englishFirst[mathrand.Intn(len(englishFirst))], 10+((index+mathrand.Intn(70))%90))
+	for attempt := 0; attempt < 64; attempt++ {
+		var candidate string
+		switch mathrand.Intn(4) {
+		case 0:
+			if mathrand.Float64() < 0.45 {
+				candidate = fmt.Sprintf("%s%d", englishFirst[mathrand.Intn(len(englishFirst))], 10+((index+mathrand.Intn(70))%90))
+			} else {
+				candidate = englishFirst[mathrand.Intn(len(englishFirst))] + englishLast[mathrand.Intn(len(englishLast))]
+			}
+		case 1:
+			name := korean[mathrand.Intn(len(korean))]
+			if mathrand.Float64() < 0.3 {
+				candidate = fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+			} else {
+				candidate = name
+			}
+		case 2:
+			name := chinese[mathrand.Intn(len(chinese))]
+			if mathrand.Float64() < 0.25 {
+				candidate = fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+			} else {
+				candidate = name
+			}
+		default:
+			name := japanese[mathrand.Intn(len(japanese))]
+			if mathrand.Float64() < 0.25 {
+				candidate = fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+			} else {
+				candidate = name
+			}
 		}
-		return englishFirst[mathrand.Intn(len(englishFirst))] + englishLast[mathrand.Intn(len(englishLast))]
-	case 1:
-		name := korean[mathrand.Intn(len(korean))]
-		if mathrand.Float64() < 0.3 {
-			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
+
+		if _, exists := usedNicknames[candidate]; !exists {
+			return candidate
 		}
-		return name
-	case 2:
-		name := chinese[mathrand.Intn(len(chinese))]
-		if mathrand.Float64() < 0.25 {
-			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
-		}
-		return name
-	default:
-		name := japanese[mathrand.Intn(len(japanese))]
-		if mathrand.Float64() < 0.25 {
-			return fmt.Sprintf("%s%d", name, 1+((index+mathrand.Intn(98))%99))
-		}
-		return name
 	}
+
+	return fmt.Sprintf("Bot-%03d", index)
 }
 
 func (s *gameState) updateBotLocked(p *player, now time.Time) {

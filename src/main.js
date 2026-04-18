@@ -40,6 +40,13 @@ const hudCooldownLabel = document.getElementById("hudCooldownLabel");
 const hudCooldownFill = document.getElementById("hudCooldownFill");
 const hudEffectLabel = document.getElementById("hudEffectLabel");
 const hudEffectFill = document.getElementById("hudEffectFill");
+const hudBuffRows = document.getElementById("hudBuffRows");
+const hudBuffGrowthRow = document.querySelector('.hud-buff-row[data-buff="growth"]');
+const hudBuffGrowthFill = document.getElementById("hudBuffGrowthFill");
+const hudBuffSpeedRow = document.querySelector('.hud-buff-row[data-buff="speed"]');
+const hudBuffSpeedFill = document.getElementById("hudBuffSpeedFill");
+const hudBuffShieldRow = document.querySelector('.hud-buff-row[data-buff="shield"]');
+const hudBuffShieldFill = document.getElementById("hudBuffShieldFill");
 const hudControls = document.getElementById("hudControls");
 const upgradePanel = document.getElementById("upgradePanel");
 const upgradeToggle = document.getElementById("upgradeToggle");
@@ -108,6 +115,30 @@ const UPGRADE_DEFS = {
   shield: { name: "강화 보호막", description: "보호막 지속 시간이 더 길어집니다." },
   magnet: { name: "중력 흡인", description: "10초 동안 작은 적까지 서서히 끌어당깁니다." },
   divider: { name: "즉시 재결합", description: "원할 때 언제든 다시 합쳐질 수 있습니다." },
+};
+
+const BENEFICIAL_EFFECT_META = {
+  growth: {
+    label: "유익균 성장",
+    duration: 32000,
+    color: "#8affcf",
+    fillColor: "#8affcf",
+    glow: "rgba(138, 255, 207, 0.28)",
+  },
+  speed: {
+    label: "유익균 속도",
+    duration: 18000,
+    color: "#60b9ff",
+    fillColor: "#9dd7ff",
+    glow: "rgba(96, 185, 255, 0.28)",
+  },
+  shield: {
+    label: "유익균 보호",
+    duration: 10000,
+    color: "#ffcf70",
+    fillColor: "#ffe1a8",
+    glow: "rgba(255, 207, 112, 0.28)",
+  },
 };
 
 const world = {
@@ -397,6 +428,7 @@ function connectSocket() {
     const data = JSON.parse(event.data);
     if (data.type === "snapshot") {
       const snapshotAt = performance.now();
+      const previousMe = state.renderPlayers.get(state.playerId);
       if (state.lastSnapshotAt > 0) {
         state.snapshotGap = Math.max(16, Math.min(140, snapshotAt - state.lastSnapshotAt));
       }
@@ -413,11 +445,12 @@ function connectSocket() {
       state.resetAt = Number(data.resetAt) || 0;
       syncRenderPlayers(data.players, snapshotAt);
       const me = state.renderPlayers.get(state.playerId);
+      maybeShowBeneficialEffectMessage(previousMe, me);
       const grouped = state.leaderboard.length > 0 ? state.leaderboard : aggregateOwners(data.players);
       const myOwnerId = me ? (me.ownerId || me.id) : state.playerId;
       const myGroup = grouped.find((entry) => entry.ownerId === myOwnerId);
       if (me) {
-        hudMass.textContent = Math.round(myGroup ? myGroup.mass : me.mass);
+        hudMass.textContent = isRespawningPlayer(me) ? `부활 ${Math.max(1, Math.ceil((me.respawnRemaining || 0) / 1000))}초` : Math.round(myGroup ? myGroup.mass : me.mass);
         updateAbilityHud(me);
       }
       renderLeaderboard();
@@ -559,6 +592,10 @@ function syncRenderPlayers(nextPlayers, snapshotAt) {
       existing.abilityName = player.abilityName;
       existing.cooldownRemaining = player.cooldownRemaining;
       existing.effectRemaining = player.effectRemaining;
+      existing.shieldRemaining = player.shieldRemaining || 0;
+      existing.probioticRemaining = player.probioticRemaining || 0;
+      existing.speedBoostRemaining = player.speedBoostRemaining || 0;
+      existing.respawnRemaining = player.respawnRemaining || 0;
       existing.scale = player.scale;
       existing.isBot = player.isBot;
       existing.coins = player.coins || 0;
@@ -581,6 +618,10 @@ function syncRenderPlayers(nextPlayers, snapshotAt) {
         velocityY: 0,
         coins: player.coins || 0,
         upgrades: player.upgrades || {},
+        shieldRemaining: player.shieldRemaining || 0,
+        probioticRemaining: player.probioticRemaining || 0,
+        speedBoostRemaining: player.speedBoostRemaining || 0,
+        respawnRemaining: player.respawnRemaining || 0,
       });
     }
   }
@@ -958,10 +999,13 @@ function drawPlayers() {
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
 
   for (const player of state.renderPlayers.values()) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     const isMe = player.id === state.playerId;
     const isSameOwner = me && (me.ownerId || me.id) === (player.ownerId || player.id);
-    const canEat = me && !isSameOwner && me.id !== player.id && me.mass > player.mass * 1.1;
-    const canBeEaten = me && !isSameOwner && me.id !== player.id && player.mass > me.mass * 1.1;
+    const canEat = me && !isSameOwner && me.id !== player.id && canPlayerEatClient(me, player);
+    const canBeEaten = me && !isSameOwner && me.id !== player.id && canPlayerEatClient(player, me);
     const deformation = getFragmentDeformation(player);
 
     ctx.fillStyle = player.color;
@@ -1243,6 +1287,9 @@ function getOwnedRepresentativePlayer() {
   const ownerId = getMyOwnerId();
   let best = null;
   for (const player of state.renderPlayers.values()) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     if ((player.ownerId || player.id) !== ownerId) {
       continue;
     }
@@ -1257,6 +1304,9 @@ function getOwnedFragmentCount() {
   const ownerId = getMyOwnerId();
   let count = 0;
   for (const player of state.renderPlayers.values()) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     if ((player.ownerId || player.id) === ownerId) {
       count += 1;
     }
@@ -1518,6 +1568,17 @@ function notifyLeave() {
 }
 
 function updateAbilityHud(player) {
+  if (isRespawningPlayer(player)) {
+    const remainingMs = player.respawnRemaining || 0;
+    const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    hudCooldownFill.style.width = `${clamp01(1 - remainingMs / 5000) * 100}%`;
+    hudCooldownLabel.textContent = "부활 대기";
+    hudEffectFill.style.width = `${clamp01(remainingMs / 5000) * 100}%`;
+    hudEffectLabel.textContent = `${remainingSeconds}초`;
+    hudEffectFill.style.background = "";
+    setBeneficialHudRows([]);
+    return;
+  }
   const cell = CELL_TYPES[player.cellType] || CELL_TYPES.classic;
   hudCellType.textContent = cell.name || player.cellType;
   hudAbilityName.textContent = player.abilityName || "없음";
@@ -1526,14 +1587,28 @@ function updateAbilityHud(player) {
   hudCooldownFill.style.width = `${cooldownRatio * 100}%`;
   hudCooldownLabel.textContent = player.cooldownRemaining > 0 ? "재충전" : "준비";
 
+  const probioticHud = getBeneficialHudState(player);
+  if (probioticHud) {
+    hudEffectFill.style.width = "0%";
+    hudEffectFill.style.background = "";
+    hudEffectLabel.textContent = "유익균";
+    setBeneficialHudRows(probioticHud.effects);
+    return;
+  }
+
   const effectRatio = cell.effectMs > 0 ? clamp01(player.effectRemaining / cell.effectMs) : 0;
   hudEffectFill.style.width = `${effectRatio * 100}%`;
+  hudEffectFill.style.background = "";
   hudEffectLabel.textContent = player.effectRemaining > 0 ? "활성" : "없음";
+  setBeneficialHudRows([]);
 }
 
 function aggregateOwners(players) {
   const totals = new Map();
   for (const player of players) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     const ownerId = player.ownerId || player.id;
     const existing = totals.get(ownerId);
     if (existing) {
@@ -1573,6 +1648,9 @@ function getOwnedMetricsFromRenderPlayers() {
   let focusY = 0;
 
   for (const player of state.renderPlayers.values()) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     if ((player.ownerId || player.id) !== ownerId) {
       continue;
     }
@@ -1612,6 +1690,9 @@ function getOwnedCenterFromPlayers() {
   let y = 0;
 
   for (const player of state.players) {
+    if (isRespawningPlayer(player)) {
+      continue;
+    }
     if ((player.ownerId || player.id) !== ownerId) {
       continue;
     }
@@ -1689,6 +1770,146 @@ function drawMinimap() {
     minimapCtx.arc(x, y, isMine ? 4 : 2.5, 0, Math.PI * 2);
     minimapCtx.fill();
   }
+}
+
+function effectiveCombatMassClient(player) {
+  return (player.mass || 0) * Math.max(1, player.scale || 1);
+}
+
+function hasShieldProtectionClient(player) {
+  if ((player.shieldRemaining || 0) > 0) {
+    return true;
+  }
+  return player.cellType === "shield" && (player.effectRemaining || 0) > 0;
+}
+
+function isRespawningPlayer(player) {
+  return (player?.respawnRemaining || 0) > 0;
+}
+
+function formatRemainingSeconds(ms) {
+  return `${Math.max(1, Math.ceil((ms || 0) / 1000))}초`;
+}
+
+function getBeneficialEffectEntries(player) {
+  const effects = [];
+  if ((player.probioticRemaining || 0) > 0) {
+    const meta = BENEFICIAL_EFFECT_META.growth;
+    effects.push({
+      key: "growth",
+      label: `${meta.label} ${formatRemainingSeconds(player.probioticRemaining)}`,
+      remaining: player.probioticRemaining,
+      duration: meta.duration,
+      color: meta.color,
+      fillColor: meta.fillColor,
+      glow: meta.glow,
+    });
+  }
+  if ((player.speedBoostRemaining || 0) > 0) {
+    const meta = BENEFICIAL_EFFECT_META.speed;
+    effects.push({
+      key: "speed",
+      label: `${meta.label} ${formatRemainingSeconds(player.speedBoostRemaining)}`,
+      remaining: player.speedBoostRemaining,
+      duration: meta.duration,
+      color: meta.color,
+      fillColor: meta.fillColor,
+      glow: meta.glow,
+    });
+  }
+  if ((player.shieldRemaining || 0) > 0) {
+    const meta = BENEFICIAL_EFFECT_META.shield;
+    effects.push({
+      key: "shield",
+      label: `${meta.label} ${formatRemainingSeconds(player.shieldRemaining)}`,
+      remaining: player.shieldRemaining,
+      duration: meta.duration,
+      color: meta.color,
+      fillColor: meta.fillColor,
+      glow: meta.glow,
+    });
+  }
+  return effects;
+}
+
+function getBeneficialHudState(player) {
+  const effects = getBeneficialEffectEntries(player);
+  if (effects.length === 0) {
+    return null;
+  }
+
+  const primary = effects.reduce((best, current) => (current.remaining > best.remaining ? current : best));
+  return {
+    effects,
+    ratio: clamp01(primary.remaining / primary.duration),
+  };
+}
+
+function setBeneficialHudRows(effects) {
+  const effectMap = new Map(effects.map((effect) => [effect.key, effect]));
+  const rows = [
+    ["growth", hudBuffGrowthRow, hudBuffGrowthFill],
+    ["speed", hudBuffSpeedRow, hudBuffSpeedFill],
+    ["shield", hudBuffShieldRow, hudBuffShieldFill],
+  ];
+  let hasAny = false;
+  for (const [key, row, element] of rows) {
+    const effect = effectMap.get(key);
+    const ratio = effect ? clamp01(effect.remaining / effect.duration) : 0;
+    element.style.width = `${ratio * 100}%`;
+    row.classList.toggle("hidden", ratio <= 0);
+    if (ratio > 0) {
+      hasAny = true;
+    }
+  }
+  hudBuffRows.classList.toggle("hidden", !hasAny);
+}
+
+function maybeShowBeneficialEffectMessage(previousPlayer, nextPlayer) {
+  if (!nextPlayer || isRespawningPlayer(nextPlayer)) {
+    return;
+  }
+
+  const gained = [];
+  if ((nextPlayer.probioticRemaining || 0) > 0 && (previousPlayer?.probioticRemaining || 0) <= 0) {
+    gained.push("성장");
+  }
+  if ((nextPlayer.speedBoostRemaining || 0) > 0 && (previousPlayer?.speedBoostRemaining || 0) <= 0) {
+    gained.push("속도");
+  }
+  if ((nextPlayer.shieldRemaining || 0) > 0 && (previousPlayer?.shieldRemaining || 0) <= 0) {
+    gained.push("보호");
+  }
+
+  if (gained.length > 0) {
+    showMessage(`유익균 효과 획득: ${gained.join(", ")}`);
+  }
+}
+
+function canPlayerEatClient(attacker, defender) {
+  const gap = Math.hypot((attacker.drawX || attacker.x) - (defender.drawX || defender.x), (attacker.drawY || attacker.y) - (defender.drawY || defender.y));
+  const attackerRadius = attacker.drawRadius || attacker.radius || 0;
+  const defenderRadius = defender.drawRadius || defender.radius || 0;
+  const requiredCenterDepth = attackerRadius - defenderRadius * 0.5;
+  if (gap > requiredCenterDepth) {
+    return false;
+  }
+  if (hasShieldProtectionClient(defender)) {
+    return false;
+  }
+  if (effectiveCombatMassClient(attacker) <= effectiveCombatMassClient(defender) * 1.1) {
+    return false;
+  }
+  if (defender.cellType === "giant" && (defender.effectRemaining || 0) > 0) {
+    const requiredMass = (defender.mass || 0) * 1.1 * Math.max(1, defender.scale || 1);
+    if (effectiveCombatMassClient(attacker) < requiredMass) {
+      return false;
+    }
+  }
+  if (attacker.cellType === "giant" && (attacker.effectRemaining || 0) > 0 && !(attacker.upgrades || {}).giant) {
+    return false;
+  }
+  return true;
 }
 
 function lerp(start, end, alpha) {

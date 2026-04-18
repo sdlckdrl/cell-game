@@ -440,6 +440,57 @@ input {
   background: linear-gradient(90deg, #ffcf70, #ffdca6);
 }
 
+.hud-buff-rows {
+  margin-top: 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.hud-buff-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-buff-name {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.meter.buff {
+  margin-top: 0;
+  height: 8px;
+}
+
+.meter.buff .meter-fill {
+  background: linear-gradient(90deg, #8affcf, #b9ffe3);
+}
+
+.meter.buff.growth {
+  background: rgba(138, 255, 207, 0.12);
+}
+
+.meter.buff.growth .meter-fill {
+  background: linear-gradient(90deg, #55e8ab, #b8ffe2);
+}
+
+.meter.buff.speed {
+  background: rgba(96, 185, 255, 0.12);
+}
+
+.meter.buff.speed .meter-fill {
+  background: linear-gradient(90deg, #60b9ff, #b7e2ff);
+}
+
+.meter.buff.shield {
+  background: rgba(255, 207, 112, 0.12);
+}
+
+.meter.buff.shield .meter-fill {
+  background: linear-gradient(90deg, #ffcf70, #ffe7b5);
+}
+
 .hud-controls {
   margin-top: 10px;
   color: var(--muted);
@@ -541,6 +592,19 @@ body.touch-device .hud-ability .hud-line strong {
   display: block;
   width: 100%;
   text-align: left;
+}
+
+body.touch-device .hud-buff-row {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 6px;
+}
+
+body.touch-device .hud-buff-name {
+  font-size: 0.68rem;
+}
+
+body.touch-device .meter.buff {
+  height: 6px;
 }
 
 body.touch-device .hud-ability .meter-block + .meter-block {

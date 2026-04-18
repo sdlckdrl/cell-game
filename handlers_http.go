@@ -1,0 +1,405 @@
+package main
+
+import (
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req joinRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	nickname := sanitizeNickname(req.Nickname)
+	cellType := sanitizeCellType(req.CellType)
+	playerID := randomID()
+	sessionID := randomID()
+	worldSize := s.worldSize()
+
+	p := &player{
+		ID:        playerID,
+		SessionID: sessionID,
+		OwnerID:   playerID,
+		Nickname:  nickname,
+		CellType:  cellType,
+		Ability:   abilityName(cellType),
+		X:         spawnCoordinate(worldSize, 400),
+		Y:         spawnCoordinate(worldSize, 400),
+		Mass:      playerStartMass,
+		Radius:    massToRadius(playerStartMass),
+		Scale:     1,
+		Color:     randomColor(),
+		LastSeen:  time.Now(),
+	}
+	p.Energy = 4000
+	s.mu.Lock()
+	s.players[playerID] = p
+	s.reconcileBotsLocked()
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, joinResponse{
+		PlayerID:  playerID,
+		SessionID: sessionID,
+		Nickname:  nickname,
+		CellType:  cellType,
+	})
+}
+
+func (s *gameState) handleLeave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req leaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	if p, ok := s.players[req.PlayerID]; ok && !p.IsBot && p.SessionID == req.SessionID {
+		if p.Conn != nil {
+			p.Conn.close()
+		}
+		delete(s.players, req.PlayerID)
+		s.reconcileBotsLocked()
+	}
+	s.mu.Unlock()
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *gameState) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireSuperAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	humanOwners := make(map[string]struct{})
+	botOwners := make(map[string]struct{})
+	for _, p := range s.players {
+		ownerID := p.OwnerID
+		if ownerID == "" {
+			ownerID = p.ID
+		}
+		if p.IsBot {
+			botOwners[ownerID] = struct{}{}
+		} else {
+			humanOwners[ownerID] = struct{}{}
+		}
+	}
+	humans := len(humanOwners)
+	bots := len(botOwners)
+	config := s.config
+	s.mu.RUnlock()
+
+	writeJSON(w, http.StatusOK, adminStatusResponse{
+		HumanPlayers: humans,
+		BotPlayers:   bots,
+		TotalPlayers: humans + bots,
+		Config:       config,
+	})
+}
+
+func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
+	if !requireSuperAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req adminConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	if req.MinimumPlayers != nil {
+		s.config.MinimumPlayers = int(math.Max(0, float64(*req.MinimumPlayers)))
+	}
+	if req.ProbioticCount != nil {
+		s.config.ProbioticCount = int(math.Max(0, float64(*req.ProbioticCount)))
+	}
+	if req.CactusCount != nil {
+		s.config.CactusCount = int(math.Max(0, float64(*req.CactusCount)))
+	}
+	if req.WormholePairs != nil {
+		s.config.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
+	}
+	if req.CactusRelocateSeconds != nil {
+		s.config.CactusRelocateSeconds = int(math.Max(0, float64(*req.CactusRelocateSeconds)))
+	}
+	if req.WormholeRelocateSeconds != nil {
+		s.config.WormholeRelocateSeconds = int(math.Max(0, float64(*req.WormholeRelocateSeconds)))
+	}
+	if req.WorldSize != nil {
+		s.config.WorldSize = sanitizeWorldSize(*req.WorldSize)
+	}
+	if req.BaseSpeed != nil {
+		s.config.BaseSpeed = math.Max(50, *req.BaseSpeed)
+	}
+	if req.SpeedDivisor != nil {
+		s.config.SpeedDivisor = math.Max(1, *req.SpeedDivisor)
+	}
+	if req.MinimumSpeed != nil {
+		s.config.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
+	}
+	s.config = normalizeRuntimeConfig(s.config)
+	s.clampWorldObjectsLocked()
+	s.reconcileProbioticsLocked()
+	s.reconcileCactiLocked()
+	s.reconcileWormholesLocked()
+	s.reconcileBotsLocked()
+	s.lastProbioticSpawn = time.Now()
+	s.lastCactusRelocation = time.Now()
+	s.lastWormholeRelocation = time.Now()
+	config := s.config
+	s.mu.Unlock()
+
+	if err := saveRuntimeConfig(config); err != nil {
+		http.Error(w, "failed to persist config", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, config)
+}
+
+func serveStatic(w http.ResponseWriter, r *http.Request) {
+	root, err := appBaseDir()
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	requestPath := r.URL.Path
+	if requestPath == "/" {
+		requestPath = "/index.html"
+	}
+
+	relativePath := strings.TrimPrefix(requestPath, "/")
+	cleanPath := filepath.Clean(relativePath)
+	fullPath := filepath.Join(root, cleanPath)
+	if !strings.HasPrefix(fullPath, root) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	ext := filepath.Ext(fullPath)
+	if contentType, ok := mimeTypes[ext]; ok {
+		w.Header().Set("Content-Type", contentType)
+	}
+	_, _ = w.Write(data)
+}
+
+func serveSuperPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/super" {
+		http.NotFound(w, r)
+		return
+	}
+	if !requireSuperAuth(w, r) {
+		return
+	}
+	root, err := appBaseDir()
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(root, "super.html"))
+}
+
+func appBaseDir() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(exePath), nil
+}
+
+func appConfigPath(name string) (string, error) {
+	root, err := appBaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, name), nil
+}
+
+func configSearchPaths(name string) []string {
+	paths := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil {
+		paths = append(paths, filepath.Join(cwd, name))
+	}
+	if exePath, err := appConfigPath(name); err == nil {
+		for _, existing := range paths {
+			if strings.EqualFold(existing, exePath) {
+				return paths
+			}
+		}
+		paths = append(paths, exePath)
+	}
+	return paths
+}
+
+func defaultRuntimeConfig() runtimeConfig {
+	return runtimeConfig{
+		MinimumPlayers:          defaultMinimumPlayers,
+		ProbioticCount:          probioticTarget,
+		CactusCount:             cactusTarget,
+		WormholePairs:           defaultWormholePairs,
+		CactusRelocateSeconds:   0,
+		WormholeRelocateSeconds: 0,
+		WorldSize:               defaultWorldSize,
+		BaseSpeed:               defaultBaseSpeed,
+		SpeedDivisor:            defaultSpeedDivisor,
+		MinimumSpeed:            defaultMinimumSpeed,
+	}
+}
+
+func runtimeConfigPath() (string, error) {
+	return appConfigPath(configFileName)
+}
+
+func loadRuntimeConfig() (runtimeConfig, error) {
+	path, err := runtimeConfigPath()
+	if err != nil {
+		return defaultRuntimeConfig(), err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultRuntimeConfig(), nil
+		}
+		return defaultRuntimeConfig(), err
+	}
+
+	config := defaultRuntimeConfig()
+	if err := json.Unmarshal(data, &config); err != nil {
+		return defaultRuntimeConfig(), err
+	}
+	return normalizeRuntimeConfig(config), nil
+}
+
+func saveRuntimeConfig(config runtimeConfig) error {
+	path, err := runtimeConfigPath()
+	if err != nil {
+		return err
+	}
+
+	normalized := normalizeRuntimeConfig(config)
+	data, err := json.MarshalIndent(normalized, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func normalizeRuntimeConfig(config runtimeConfig) runtimeConfig {
+	config.MinimumPlayers = int(math.Max(0, float64(config.MinimumPlayers)))
+	config.ProbioticCount = int(math.Max(0, float64(config.ProbioticCount)))
+	config.CactusCount = int(math.Max(0, float64(config.CactusCount)))
+	config.WormholePairs = int(math.Max(0, float64(config.WormholePairs)))
+	config.CactusRelocateSeconds = int(math.Max(0, float64(config.CactusRelocateSeconds)))
+	config.WormholeRelocateSeconds = int(math.Max(0, float64(config.WormholeRelocateSeconds)))
+	config.WorldSize = sanitizeWorldSize(config.WorldSize)
+	config.BaseSpeed = math.Max(50, config.BaseSpeed)
+	config.SpeedDivisor = math.Max(1, config.SpeedDivisor)
+	config.MinimumSpeed = math.Max(10, config.MinimumSpeed)
+	return config
+}
+
+func requireSuperAuth(w http.ResponseWriter, r *http.Request) bool {
+	credentials, err := loadSuperAdminConfig()
+	if err != nil {
+		log.Printf("super admin auth unavailable: %v", err)
+		http.Error(w, "super admin credentials are not configured", http.StatusServiceUnavailable)
+		return false
+	}
+
+	expectedUser := credentials.Username
+	expectedPassword := credentials.Password
+	expectedToken := superAuthToken(expectedUser, expectedPassword)
+	if cookie, err := r.Cookie("super_auth"); err == nil && cookie.Value == expectedToken {
+		return true
+	}
+
+	username, password, ok := r.BasicAuth()
+	if ok && username == expectedUser && password == expectedPassword {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "super_auth",
+			Value:    expectedToken,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   86400,
+		})
+		return true
+	}
+
+	w.Header().Set("WWW-Authenticate", `Basic realm="Super Admin"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+func loadSuperAdminConfig() (superAdminConfig, error) {
+	paths := configSearchPaths(superAdminConfigFileName)
+	for _, path := range paths {
+		if data, readErr := os.ReadFile(path); readErr == nil {
+			var config superAdminConfig
+			if err := json.Unmarshal(data, &config); err != nil {
+				return superAdminConfig{}, fmt.Errorf("invalid %s at %s: %w", superAdminConfigFileName, path, err)
+			}
+			config.Username = strings.TrimSpace(config.Username)
+			config.Password = strings.TrimSpace(config.Password)
+			if config.Username == "" || config.Password == "" {
+				return superAdminConfig{}, fmt.Errorf("%s at %s must include username and password", superAdminConfigFileName, path)
+			}
+			return config, nil
+		} else if !os.IsNotExist(readErr) {
+			return superAdminConfig{}, readErr
+		}
+	}
+
+	config := superAdminConfig{
+		Username: strings.TrimSpace(os.Getenv("SUPER_USERNAME")),
+		Password: strings.TrimSpace(os.Getenv("SUPER_PASSWORD")),
+	}
+	if config.Username == "" || config.Password == "" {
+		return superAdminConfig{}, fmt.Errorf("%s not found in working directory or executable directory, and SUPER_USERNAME/SUPER_PASSWORD are empty", superAdminConfigFileName)
+	}
+	return config, nil
+}
+
+func superAuthToken(username, password string) string {
+	hash := sha1.Sum([]byte(username + ":" + password + ":super"))
+	return base64.StdEncoding.EncodeToString(hash[:])
+}

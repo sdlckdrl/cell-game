@@ -186,6 +186,8 @@ const state = {
   chatCollapsed: true,
   chatLastActivityAt: 0,
   chatPreviewUntil: 0,
+  lastLeaderboardKey: "",
+  lastChatRenderKey: "",
   isTouchDevice: matchMedia("(pointer: coarse)").matches || "ontouchstart" in window,
   touch: {
     active: false,
@@ -677,32 +679,59 @@ function render() {
   drawMinimap();
 }
 
+function getVisibleWorldBounds(padding = 0) {
+  const zoom = Math.max(state.zoom, 0.01);
+  const halfWidth = canvas.width / zoom * 0.5 + padding;
+  const halfHeight = canvas.height / zoom * 0.5 + padding;
+  return {
+    left: state.camera.x - halfWidth,
+    right: state.camera.x + halfWidth,
+    top: state.camera.y - halfHeight,
+    bottom: state.camera.y + halfHeight,
+  };
+}
+
+function isCircleInView(x, y, radius, bounds) {
+  return !(x + radius < bounds.left || x - radius > bounds.right || y + radius < bounds.top || y - radius > bounds.bottom);
+}
+
 function drawBackground() {
   ctx.fillStyle = "#08101d";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  const bounds = getVisibleWorldBounds(140);
+  const gridSize = 120;
+  const startX = Math.max(0, Math.floor(bounds.left / gridSize) * gridSize);
+  const endX = Math.min(world.width, Math.ceil(bounds.right / gridSize) * gridSize);
+  const startY = Math.max(0, Math.floor(bounds.top / gridSize) * gridSize);
+  const endY = Math.min(world.height, Math.ceil(bounds.bottom / gridSize) * gridSize);
+
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
   ctx.strokeStyle = "rgba(255,255,255,0.05)";
-  for (let x = 0; x <= world.width; x += 120) {
+  for (let x = startX; x <= endX; x += gridSize) {
     ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, world.height);
+    ctx.moveTo(x, startY);
+    ctx.lineTo(x, endY);
     ctx.stroke();
   }
-  for (let y = 0; y <= world.height; y += 120) {
+  for (let y = startY; y <= endY; y += gridSize) {
     ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(world.width, y);
+    ctx.moveTo(startX, y);
+    ctx.lineTo(endX, y);
     ctx.stroke();
   }
   ctx.restore();
 }
 
 function drawFoods() {
+  const bounds = getVisibleWorldBounds(90);
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
   for (const food of state.foods) {
+    if (!isCircleInView(food.x, food.y, food.radius + 8, bounds)) {
+      continue;
+    }
     if (food.kind === "probiotic" || food.kind === "probiotic-growth" || food.kind === "probiotic-speed" || food.kind === "probiotic-shield") {
       const pulse = 1 + Math.sin(state.time * 3.4 + food.x * 0.01) * 0.08;
       const radius = food.radius * pulse;
@@ -850,10 +879,14 @@ function drawBeneficialFoodIcon(food, radius, palette) {
 }
 
 function drawWormholes() {
+  const bounds = getVisibleWorldBounds(180);
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
 
   for (const hole of state.wormholes) {
+    if (!isCircleInView(hole.x, hole.y, hole.pullRange, bounds)) {
+      continue;
+    }
     const phase = state.time * (hole.kind === "blackhole" ? 2.8 : 2.2) + hole.x * 0.006;
     const radius = hole.radius * (1 + Math.sin(phase) * 0.035);
 
@@ -925,10 +958,14 @@ function drawWormholes() {
 }
 
 function drawCacti() {
+  const bounds = getVisibleWorldBounds(140);
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
 
   for (const cactus of state.cacti) {
+    if (!isCircleInView(cactus.x, cactus.y, cactus.size * 1.5, bounds)) {
+      continue;
+    }
     const phase = state.time * 2.2 + cactus.x * 0.01 + cactus.y * 0.008;
     const pulse = 1 + Math.sin(phase) * 0.05;
     const radius = cactus.size * pulse;
@@ -995,11 +1032,15 @@ function drawCacti() {
 
 function drawPlayers() {
   const me = state.renderPlayers.get(state.playerId);
+  const bounds = getVisibleWorldBounds(120);
   ctx.save();
   ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
 
   for (const player of state.renderPlayers.values()) {
     if (isRespawningPlayer(player)) {
+      continue;
+    }
+    if (!isCircleInView(player.drawX, player.drawY, player.drawRadius + 14, bounds)) {
       continue;
     }
     const isMe = player.id === state.playerId;
@@ -1124,9 +1165,15 @@ function renderLeaderboard() {
   const myOwnerId = getMyOwnerId();
   const myIndex = grouped.findIndex((player) => player.ownerId === myOwnerId);
   hudRank.textContent = myIndex >= 0 ? `${myIndex + 1} / ${grouped.length}` : "-";
+  const topEntries = grouped.slice(0, 6);
+  const renderKey = `${myOwnerId}|${myIndex}|${topEntries.map((player) => `${player.ownerId}:${Math.round(player.mass)}`).join("|")}`;
+  if (state.lastLeaderboardKey === renderKey) {
+    return;
+  }
+  state.lastLeaderboardKey = renderKey;
   leaderboardContent.innerHTML = `
     <h2>리더보드</h2>
-    ${grouped.slice(0, 6).map((player, index) => `
+    ${topEntries.map((player, index) => `
       <div class="leader-line">
         <span>${index + 1}. ${player.nickname}</span>
         <strong>${Math.round(player.mass)}</strong>
@@ -1142,6 +1189,11 @@ function renderChat() {
   chatPanel.classList.toggle("preview", previewActive);
   chatPanel.classList.toggle("faded", !state.chatCollapsed && state.chats.length > 0 && idleSeconds > 4);
   const items = state.chats.slice(previewActive ? -3 : -12);
+  const renderKey = `${previewActive ? "p" : "f"}|${state.chatCollapsed ? "c" : "o"}|${items.map((entry) => entry.id).join("|")}`;
+  if (state.lastChatRenderKey === renderKey) {
+    return;
+  }
+  state.lastChatRenderKey = renderKey;
   if (items.length === 0) {
     chatMessages.innerHTML = `<div class="chat-entry"><div class="chat-text">아직 채팅이 없습니다.</div></div>`;
     return;
@@ -1949,6 +2001,27 @@ function applyRuntimeConfig(config) {
   }
 }
 
+function getViewportSafeSize() {
+  const width = Math.max(320, canvas.width || window.innerWidth || 0);
+  const height = Math.max(240, canvas.height || window.innerHeight || 0);
+
+  if (state.isTouchDevice) {
+    const reservedWidth = Math.min(width * 0.24, 150);
+    const reservedHeight = Math.min(height * 0.12, 82);
+    return {
+      width: Math.max(220, width - reservedWidth),
+      height: Math.max(180, height - reservedHeight),
+    };
+  }
+
+  const reservedWidth = Math.min(width * 0.18, 220);
+  const reservedHeight = Math.min(height * 0.08, 70);
+  return {
+    width: Math.max(280, width - reservedWidth),
+    height: Math.max(220, height - reservedHeight),
+  };
+}
+
 function getAutoZoom() {
   const metrics = getOwnedMetricsFromRenderPlayers();
   if (!metrics) {
@@ -1956,9 +2029,21 @@ function getAutoZoom() {
   }
 
   const dominantRadius = Math.max(24, metrics.maxRadius);
-  const desiredDiameter = 360 + dominantRadius * 9.6 + Math.sqrt(metrics.totalMass) * 16;
-  const screenSpan = Math.min(canvas.width, canvas.height);
-  return clampRange(screenSpan / desiredDiameter, 0.08, 1.05);
+  const massRoot = Math.sqrt(metrics.totalMass);
+  const safeViewport = getViewportSafeSize();
+  const aspect = safeViewport.width / Math.max(1, safeViewport.height);
+  const horizontalSpan = Math.max(
+    dominantRadius * 3.4,
+    280 + dominantRadius * 5.1 + massRoot * 6.4,
+  );
+  const verticalSpan = Math.max(
+    dominantRadius * 3.1,
+    250 + dominantRadius * 4.6 + massRoot * 5.6,
+  );
+  const aspectCompensation = clampRange(aspect, 0.72, 1.45);
+  const zoomX = safeViewport.width / (horizontalSpan * Math.max(1, aspectCompensation * 0.92));
+  const zoomY = safeViewport.height / (verticalSpan * Math.max(1, 1.08 / aspectCompensation));
+  return clampRange(Math.min(zoomX, zoomY), 0.16, 1.05);
 }
 
 resizeCanvas();

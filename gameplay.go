@@ -519,9 +519,10 @@ func buildOwnerLeaderboard(players map[string]*player) []ownerSummary {
 			}
 			totals[ownerID] = entry
 		}
-		entry.Mass += p.Mass
-		if p.Mass >= maxMass[ownerID] {
-			maxMass[ownerID] = p.Mass
+		combatMass := effectiveCombatMass(p)
+		entry.Mass += combatMass
+		if combatMass >= maxMass[ownerID] {
+			maxMass[ownerID] = combatMass
 			entry.Nickname = p.Nickname
 		}
 	}

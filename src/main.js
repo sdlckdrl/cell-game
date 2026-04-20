@@ -213,7 +213,12 @@ if (state.isTouchDevice) {
 }
 
 window.addEventListener("resize", resizeCanvas);
-window.addEventListener("orientationchange", updateRotatePrompt);
+window.addEventListener("orientationchange", () => {
+  updateRotatePrompt();
+  window.setTimeout(resizeCanvas, 60);
+  window.setTimeout(resizeCanvas, 220);
+});
+window.visualViewport?.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
   const isChatTyping = document.activeElement === chatInput;
   if (isTypingInField() && !(event.code === "Enter" && isChatTyping)) {
@@ -390,8 +395,10 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const viewportWidth = window.visualViewport?.width || window.innerWidth;
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  canvas.width = Math.max(1, Math.round(viewportWidth));
+  canvas.height = Math.max(1, Math.round(viewportHeight));
 }
 
 function connectSocket() {
@@ -452,7 +459,7 @@ function connectSocket() {
       const myOwnerId = me ? (me.ownerId || me.id) : state.playerId;
       const myGroup = grouped.find((entry) => entry.ownerId === myOwnerId);
       if (me) {
-        hudMass.textContent = isRespawningPlayer(me) ? `부활 ${Math.max(1, Math.ceil((me.respawnRemaining || 0) / 1000))}초` : Math.round(myGroup ? myGroup.mass : me.mass);
+        hudMass.textContent = isRespawningPlayer(me) ? `부활 ${Math.max(1, Math.ceil((me.respawnRemaining || 0) / 1000))}초` : Math.round(myGroup ? myGroup.mass : effectiveCombatMassClient(me));
         updateAbilityHud(me);
       }
       renderLeaderboard();
@@ -1079,6 +1086,11 @@ function drawPlayers() {
       ctx.stroke();
     }
 
+    const beneficialEffects = getBeneficialEffectEntries(player);
+    if (beneficialEffects.length > 0) {
+      drawBeneficialEffectRings(player, beneficialEffects);
+    }
+
     ctx.fillStyle = "#eef7ff";
     const nameFontSize = Math.max(12, Math.min(player.drawRadius * 0.72, player.drawRadius * (player.nickname.length <= 4 ? 0.82 : 0.66)));
     const massFontSize = Math.max(10, Math.min(player.drawRadius * 0.34, 28));
@@ -1088,10 +1100,30 @@ function drawPlayers() {
     ctx.fillText(player.nickname, player.drawX, player.drawY - Math.min(10, player.drawRadius * 0.14));
     ctx.font = `${massFontSize}px Segoe UI`;
     ctx.fillStyle = "rgba(238,247,255,0.82)";
-    ctx.fillText(String(Math.round(player.mass)), player.drawX, player.drawY + Math.min(16, player.drawRadius * 0.22));
+    ctx.fillText(String(Math.round(effectiveCombatMassClient(player))), player.drawX, player.drawY + Math.min(16, player.drawRadius * 0.22));
   }
 
   ctx.restore();
+}
+
+function drawBeneficialEffectRings(player, effects) {
+  const baseRadius = player.drawRadius + 8;
+  effects.forEach((effect, index) => {
+    const ringRadius = baseRadius + index * 7;
+    const pulse = 1 + Math.sin(state.time * 4.2 + player.drawX * 0.01 + index * 0.8) * 0.035;
+
+    ctx.strokeStyle = effect.glow;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(player.drawX, player.drawY, ringRadius * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = effect.color;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.arc(player.drawX, player.drawY, ringRadius * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+  });
 }
 
 function getFragmentDeformation(player) {
@@ -1664,21 +1696,23 @@ function aggregateOwners(players) {
     const ownerId = player.ownerId || player.id;
     const existing = totals.get(ownerId);
     if (existing) {
-      existing.mass += player.mass;
-      existing.fragments += 1;
-      if (player.mass > existing.maxMass) {
-        existing.maxMass = player.mass;
-        existing.nickname = player.nickname;
+        existing.mass += effectiveCombatMassClient(player);
+        existing.fragments += 1;
+        const combatMass = effectiveCombatMassClient(player);
+        if (combatMass > existing.maxMass) {
+          existing.maxMass = combatMass;
+          existing.nickname = player.nickname;
+        }
+      } else {
+      const combatMass = effectiveCombatMassClient(player);
+        totals.set(ownerId, {
+          ownerId,
+          nickname: player.nickname,
+          mass: combatMass,
+          maxMass: combatMass,
+          fragments: 1,
+        });
       }
-    } else {
-      totals.set(ownerId, {
-        ownerId,
-        nickname: player.nickname,
-        mass: player.mass,
-        maxMass: player.mass,
-        fragments: 1,
-      });
-    }
   }
   return [...totals.values()];
 }
@@ -2002,14 +2036,16 @@ function applyRuntimeConfig(config) {
 }
 
 function getViewportSafeSize() {
-  const width = Math.max(320, canvas.width || window.innerWidth || 0);
-  const height = Math.max(240, canvas.height || window.innerHeight || 0);
+  const width = Math.max(320, canvas.width || window.visualViewport?.width || window.innerWidth || 0);
+  const height = Math.max(240, canvas.height || window.visualViewport?.height || window.innerHeight || 0);
+  const isLandscape = width >= height;
 
   if (state.isTouchDevice) {
-    const reservedWidth = Math.min(width * 0.24, 150);
-    const reservedHeight = Math.min(height * 0.12, 82);
+    // Mobile controls are floating overlays, so we should not reserve large side gutters.
+    const reservedWidth = isLandscape ? Math.min(width * 0.04, 42) : Math.min(width * 0.1, 56);
+    const reservedHeight = isLandscape ? Math.min(height * 0.06, 26) : Math.min(height * 0.1, 48);
     return {
-      width: Math.max(220, width - reservedWidth),
+      width: Math.max(240, width - reservedWidth),
       height: Math.max(180, height - reservedHeight),
     };
   }
@@ -2032,6 +2068,7 @@ function getAutoZoom() {
   const massRoot = Math.sqrt(metrics.totalMass);
   const safeViewport = getViewportSafeSize();
   const aspect = safeViewport.width / Math.max(1, safeViewport.height);
+  const isMobileLandscape = state.isTouchDevice && safeViewport.width >= safeViewport.height;
   const horizontalSpan = Math.max(
     dominantRadius * 3.4,
     280 + dominantRadius * 5.1 + massRoot * 6.4,
@@ -2040,10 +2077,14 @@ function getAutoZoom() {
     dominantRadius * 3.1,
     250 + dominantRadius * 4.6 + massRoot * 5.6,
   );
-  const aspectCompensation = clampRange(aspect, 0.72, 1.45);
-  const zoomX = safeViewport.width / (horizontalSpan * Math.max(1, aspectCompensation * 0.92));
-  const zoomY = safeViewport.height / (verticalSpan * Math.max(1, 1.08 / aspectCompensation));
-  return clampRange(Math.min(zoomX, zoomY), 0.16, 1.05);
+  const aspectCompensation = clampRange(aspect, 0.72, isMobileLandscape ? 1.9 : 1.45);
+  const horizontalBias = isMobileLandscape ? 0.9 : 0.92;
+  const verticalBias = isMobileLandscape ? 1.0 : 1.08;
+  const zoomX = safeViewport.width / (horizontalSpan * Math.max(1, aspectCompensation * horizontalBias));
+  const zoomY = safeViewport.height / (verticalSpan * Math.max(1, verticalBias / aspectCompensation));
+  const minZoom = isMobileLandscape ? 0.22 : 0.16;
+  const maxZoom = isMobileLandscape ? 1.12 : 1.05;
+  return clampRange(Math.min(zoomX, zoomY), minZoom, maxZoom);
 }
 
 resizeCanvas();

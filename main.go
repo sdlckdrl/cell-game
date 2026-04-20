@@ -24,6 +24,7 @@ const (
 	defaultWormholePairs     = 3
 	playerStartMass          = 36.0
 	tickRate                 = 30
+	snapshotRate             = 15
 	playerTimeout            = 60 * time.Second
 	playerCullRange          = 1280.0
 	foodCullRange            = 1460.0
@@ -343,10 +344,15 @@ func main() {
 func (s *gameState) runWorld() {
 	ticker := time.NewTicker(time.Second / tickRate)
 	defer ticker.Stop()
+	snapshotInterval := maxInt(1, tickRate/maxInt(1, snapshotRate))
+	tickCount := 0
 
 	for range ticker.C {
 		s.updateWorld()
-		s.broadcastSnapshot()
+		tickCount++
+		if tickCount%snapshotInterval == 0 {
+			s.broadcastSnapshot()
+		}
 	}
 }
 

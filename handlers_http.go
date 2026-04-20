@@ -38,7 +38,7 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 		OwnerID:   playerID,
 		Nickname:  nickname,
 		CellType:  cellType,
-		Ability:   abilityName(cellType),
+		Ability:   abilityLabel(cellType),
 		X:         spawnCoordinate(worldSize, 400),
 		Y:         spawnCoordinate(worldSize, 400),
 		Mass:      playerStartMass,
@@ -238,6 +238,12 @@ func serveSuperPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func appBaseDir() (string, error) {
+	if cwd, err := os.Getwd(); err == nil {
+		if _, statErr := os.Stat(filepath.Join(cwd, "index.html")); statErr == nil {
+			return cwd, nil
+		}
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return "", err

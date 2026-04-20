@@ -48,6 +48,25 @@ func cloneChats(entries []chatEntry) []chatEntry {
 	return cloned
 }
 
+func abilityLabel(cellType string) string {
+	switch cellType {
+	case "classic":
+		return "코어 가속"
+	case "blink":
+		return "순간이동"
+	case "giant":
+		return "거대화"
+	case "shield":
+		return "보호막"
+	case "magnet":
+		return "흡착"
+	case "divider":
+		return "세포 분열"
+	default:
+		return "질주"
+	}
+}
+
 func abilityName(cellType string) string {
 	switch cellType {
 	case "classic":
@@ -96,6 +115,13 @@ func clamp(value, min, max float64) float64 {
 		return max
 	}
 	return value
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func sanitizeWorldSize(size float64) float64 {

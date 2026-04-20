@@ -82,7 +82,7 @@ func newBotPlayer(index int, usedNicknames map[string]struct{}, worldSize float6
 		OwnerID:        id,
 		Nickname:       randomPreferredBotNickname(index, usedNicknames),
 		CellType:       cellType,
-		Ability:        abilityName(cellType),
+		Ability:        abilityLabel(cellType),
 		X:              spawnCoordinate(worldSize, 400),
 		Y:              spawnCoordinate(worldSize, 400),
 		Mass:           mass,

@@ -153,6 +153,7 @@ const RADIUS_QUANT_SCALE = 8;
 const VALUE_QUANT_SCALE = 16;
 const SCALE_QUANT_SCALE = 1024;
 const MASS_QUANT_SCALE = 16;
+const DURATION_QUANT_STEP_MS = 100;
 
 const state = {
   playerId: null,
@@ -230,13 +231,23 @@ if (state.isTouchDevice) {
   updateRotatePrompt();
 }
 
-window.addEventListener("resize", resizeCanvas);
+window.addEventListener("resize", () => {
+  resizeCanvas();
+  updateRotatePrompt();
+});
 window.addEventListener("orientationchange", () => {
   updateRotatePrompt();
   window.setTimeout(resizeCanvas, 60);
   window.setTimeout(resizeCanvas, 220);
+  window.setTimeout(updateRotatePrompt, 60);
+  window.setTimeout(updateRotatePrompt, 220);
 });
-window.visualViewport?.addEventListener("resize", resizeCanvas);
+window.visualViewport?.addEventListener("resize", () => {
+  resizeCanvas();
+  updateRotatePrompt();
+});
+document.addEventListener("fullscreenchange", updateRotatePrompt);
+document.addEventListener("webkitfullscreenchange", updateRotatePrompt);
 window.addEventListener("keydown", (event) => {
   const isChatTyping = document.activeElement === chatInput;
   if (isTypingInField() && !(event.code === "Enter" && isChatTyping)) {
@@ -1342,12 +1353,12 @@ function readBinaryPlayer(reader) {
   const isBot = readU8(reader) === 1;
   const coins = readU16(reader);
   const upgrades = decodeUpgradeBits(readU8(reader));
-  const cooldownRemaining = readU32(reader);
-  const effectRemaining = readU32(reader);
-  const shieldRemaining = readU32(reader);
-  const probioticRemaining = readU32(reader);
-  const speedBoostRemaining = readU32(reader);
-  const respawnRemaining = readU32(reader);
+  const cooldownRemaining = readDurationU16(reader);
+  const effectRemaining = readDurationU16(reader);
+  const shieldRemaining = readDurationU16(reader);
+  const probioticRemaining = readDurationU16(reader);
+  const speedBoostRemaining = readDurationU16(reader);
+  const respawnRemaining = readDurationU16(reader);
   return {
     id,
     ownerId,
@@ -1457,6 +1468,10 @@ function readQuantU16(reader, scale) {
 
 function readQuantU32(reader, scale) {
   return readU32(reader) / scale;
+}
+
+function readDurationU16(reader) {
+  return readU16(reader) * DURATION_QUANT_STEP_MS;
 }
 
 function decodeUpgradeBits(bits) {
@@ -1813,7 +1828,12 @@ function updateRotatePrompt() {
   if (!rotatePrompt || !state.isTouchDevice) {
     return;
   }
-  const isPortrait = window.innerHeight > window.innerWidth;
+  const orientationType = screen.orientation?.type || "";
+  const isLandscapeByAPI = orientationType.startsWith("landscape");
+  const viewportWidth = window.visualViewport?.width || window.innerWidth;
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  const isPortraitByViewport = viewportHeight > viewportWidth;
+  const isPortrait = !isLandscapeByAPI && isPortraitByViewport;
   rotatePrompt.classList.toggle("hidden", !isPortrait);
 }
 

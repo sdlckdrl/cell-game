@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -282,27 +281,25 @@ func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 		return fmt.Errorf("connection closed")
 	}
 
-	frame := bytes.NewBuffer(nil)
-	frame.WriteByte(opcode)
-
+	var header [10]byte
+	header[0] = opcode
+	headerLen := 2
 	length := len(payload)
 	switch {
 	case length < 126:
-		frame.WriteByte(byte(length))
+		header[1] = byte(length)
 	case length <= math.MaxUint16:
-		frame.WriteByte(126)
-		buf := make([]byte, 2)
-		binary.BigEndian.PutUint16(buf, uint16(length))
-		frame.Write(buf)
+		header[1] = 126
+		binary.BigEndian.PutUint16(header[2:4], uint16(length))
+		headerLen = 4
 	default:
-		frame.WriteByte(127)
-		buf := make([]byte, 8)
-		binary.BigEndian.PutUint64(buf, uint64(length))
-		frame.Write(buf)
+		header[1] = 127
+		binary.BigEndian.PutUint64(header[2:10], uint64(length))
+		headerLen = 10
 	}
 
-	frame.Write(payload)
-	_, err := c.conn.Write(frame.Bytes())
+	segments := net.Buffers{header[:headerLen], payload}
+	_, err := segments.WriteTo(c.conn)
 	return err
 }
 

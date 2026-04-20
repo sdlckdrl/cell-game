@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"math"
 	mathrand "math/rand"
@@ -139,19 +140,9 @@ func spawnCoordinate(worldSize, padding float64) float64 {
 }
 
 func randomID() string {
-	buf := make([]byte, 16)
+	buf := make([]byte, 9)
 	if _, err := rand.Read(buf); err != nil {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-	return hexFormat(buf)
-}
-
-func hexFormat(buf []byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, len(buf)*2)
-	for i, b := range buf {
-		out[i*2] = digits[b>>4]
-		out[i*2+1] = digits[b&0x0f]
-	}
-	return string(out)
+	return base64.RawURLEncoding.EncodeToString(buf)
 }

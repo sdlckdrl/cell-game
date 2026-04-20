@@ -50,52 +50,54 @@
 
   <canvas id="gameCanvas"></canvas>
 
-  <div id="hud" class="hud hidden">
-    <div class="hud-card hud-summary">
-      <div class="hud-line"><span>닉네임</span><strong id="hudName">-</strong></div>
-      <div class="hud-line"><span>세포</span><strong id="hudCellType">-</strong></div>
-      <div class="hud-line"><span>질량</span><strong id="hudMass">0</strong></div>
-      <div class="hud-line"><span>순위</span><strong id="hudRank">-</strong></div>
-    </div>
-    <div class="hud-card hud-ability">
-      <div class="hud-line"><span>전용기</span><strong id="hudAbilityName">-</strong></div>
-      <div class="meter-block">
-        <div class="hud-line"><span>전용기 쿨</span><strong id="hudCooldownLabel">준비</strong></div>
-        <div class="meter"><div id="hudCooldownFill" class="meter-fill"></div></div>
+  <div class="left-sidebar">
+    <div id="hud" class="hud hidden">
+      <div class="hud-card hud-summary">
+        <div class="hud-line"><span>닉네임</span><strong id="hudName">-</strong></div>
+        <div class="hud-line"><span>세포</span><strong id="hudCellType">-</strong></div>
+        <div class="hud-line"><span>질량</span><strong id="hudMass">0</strong></div>
+        <div class="hud-line"><span>순위</span><strong id="hudRank">-</strong></div>
       </div>
-      <div class="meter-block">
-        <div class="hud-line"><span>효과 지속</span><strong id="hudEffectLabel">없음</strong></div>
-        <div class="meter effect"><div id="hudEffectFill" class="meter-fill"></div></div>
-        <div id="hudBuffRows" class="hud-buff-rows hidden">
-          <div class="hud-buff-row" data-buff="growth">
-            <span class="hud-buff-name">성장</span>
-            <div class="meter buff growth"><div id="hudBuffGrowthFill" class="meter-fill"></div></div>
-          </div>
-          <div class="hud-buff-row" data-buff="speed">
-            <span class="hud-buff-name">속도</span>
-            <div class="meter buff speed"><div id="hudBuffSpeedFill" class="meter-fill"></div></div>
-          </div>
-          <div class="hud-buff-row" data-buff="shield">
-            <span class="hud-buff-name">보호</span>
-            <div class="meter buff shield"><div id="hudBuffShieldFill" class="meter-fill"></div></div>
+      <div class="hud-card hud-ability">
+        <div class="hud-line"><span>전용기</span><strong id="hudAbilityName">-</strong></div>
+        <div class="meter-block">
+          <div class="hud-line"><span>전용기 쿨</span><strong id="hudCooldownLabel">준비</strong></div>
+          <div class="meter"><div id="hudCooldownFill" class="meter-fill"></div></div>
+        </div>
+        <div class="meter-block">
+          <div class="hud-line"><span>효과 지속</span><strong id="hudEffectLabel">없음</strong></div>
+          <div class="meter effect"><div id="hudEffectFill" class="meter-fill"></div></div>
+          <div id="hudBuffRows" class="hud-buff-rows hidden">
+            <div class="hud-buff-row" data-buff="growth">
+              <span class="hud-buff-name">성장</span>
+              <div class="meter buff growth"><div id="hudBuffGrowthFill" class="meter-fill"></div></div>
+            </div>
+            <div class="hud-buff-row" data-buff="speed">
+              <span class="hud-buff-name">속도</span>
+              <div class="meter buff speed"><div id="hudBuffSpeedFill" class="meter-fill"></div></div>
+            </div>
+            <div class="hud-buff-row" data-buff="shield">
+              <span class="hud-buff-name">보호</span>
+              <div class="meter buff shield"><div id="hudBuffShieldFill" class="meter-fill"></div></div>
+            </div>
           </div>
         </div>
+        <div id="hudControls" class="hud-controls">키 안내: Space 전용기 / W 배출</div>
       </div>
-      <div id="hudControls" class="hud-controls">키 안내: Space 전용기 / W 배출</div>
     </div>
-  </div>
-  <div id="upgradePanel" class="upgrade-panel hidden">
-    <button id="upgradeToggle" class="upgrade-toggle" type="button" aria-expanded="false">업그레이드</button>
-    <div id="upgradeContent" class="upgrade-content hidden">
-    <div class="upgrade-head">
-      <span>업그레이드</span>
-      <strong id="upgradeCoins">0코인</strong>
-    </div>
-    <div class="upgrade-body">
-      <div id="upgradeName" class="upgrade-name">-</div>
-      <div id="upgradeDescription" class="upgrade-description">현재 세포 전용 업그레이드가 여기에 표시됩니다.</div>
-    </div>
-    <button id="upgradeBuy" class="upgrade-buy" type="button">업그레이드 구매</button>
+    <div id="upgradePanel" class="upgrade-panel hidden">
+      <button id="upgradeToggle" class="upgrade-toggle" type="button" aria-expanded="false">업그레이드</button>
+      <div id="upgradeContent" class="upgrade-content hidden">
+      <div class="upgrade-head">
+        <span>업그레이드</span>
+        <strong id="upgradeCoins">0코인</strong>
+      </div>
+      <div class="upgrade-body">
+        <div id="upgradeName" class="upgrade-name">-</div>
+        <div id="upgradeDescription" class="upgrade-description">현재 세포 전용 업그레이드가 여기에 표시됩니다.</div>
+      </div>
+      <button id="upgradeBuy" class="upgrade-buy" type="button">업그레이드 구매</button>
+      </div>
     </div>
   </div>
 

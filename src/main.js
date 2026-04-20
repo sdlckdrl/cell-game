@@ -147,15 +147,25 @@ const world = {
 };
 
 const RESET_WARNING_WINDOW_MS = 5 * 60 * 1000;
+const snapshotTextDecoder = new TextDecoder();
+const COORD_QUANT_SCALE = 8;
+const RADIUS_QUANT_SCALE = 8;
+const VALUE_QUANT_SCALE = 16;
+const SCALE_QUANT_SCALE = 1024;
+const MASS_QUANT_SCALE = 16;
 
 const state = {
   playerId: null,
   sessionId: null,
   nickname: "",
+  playerMap: new Map(),
   players: [],
   leaderboard: [],
   chats: [],
   renderPlayers: new Map(),
+  foodMap: new Map(),
+  cactusMap: new Map(),
+  wormholeMap: new Map(),
   foods: [],
   cacti: [],
   wormholes: [],
@@ -188,6 +198,7 @@ const state = {
   chatPreviewUntil: 0,
   lastLeaderboardKey: "",
   lastChatRenderKey: "",
+  chatComposing: false,
   isTouchDevice: matchMedia("(pointer: coarse)").matches || "ontouchstart" in window,
   touch: {
     active: false,
@@ -197,6 +208,13 @@ const state = {
     dx: 0,
     dy: 0,
     radius: 44,
+  },
+  strings: {
+    ownerIds: new Map(),
+    nicknames: new Map(),
+    colors: new Map(),
+    abilityNames: new Map(),
+    cellTypes: new Map(),
   },
 };
 
@@ -234,16 +252,18 @@ window.addEventListener("keydown", (event) => {
     state.mergePressed = true;
   }
   if (event.code === "Enter" && state.connected) {
-    event.preventDefault();
-    if (isChatTyping && !chatInput.value.trim()) {
-      setChatCollapsed(true);
-      chatInput.blur();
-      return;
-    }
     if (isChatTyping) {
-      sendChat();
+      if (event.isComposing || state.chatComposing) {
+        return;
+      }
+      if (!chatInput.value.trim()) {
+        event.preventDefault();
+        setChatCollapsed(true);
+        chatInput.blur();
+      }
       return;
     }
+    event.preventDefault();
     if (state.chatCollapsed) {
       setChatCollapsed(false);
     }
@@ -354,7 +374,18 @@ chatToggle.addEventListener("click", () => {
 
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (state.chatComposing) {
+    return;
+  }
   sendChat();
+});
+
+chatInput.addEventListener("compositionstart", () => {
+  state.chatComposing = true;
+});
+
+chatInput.addEventListener("compositionend", () => {
+  state.chatComposing = false;
 });
 
 renderCellOptions();
@@ -411,6 +442,7 @@ function connectSocket() {
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${window.location.host}/ws?playerId=${encodeURIComponent(state.playerId)}&sessionId=${encodeURIComponent(state.sessionId)}`);
+  socket.binaryType = "arraybuffer";
   state.socket = socket;
 
   socket.addEventListener("open", () => {
@@ -434,6 +466,11 @@ function connectSocket() {
   });
 
   socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") {
+      handleBinarySnapshot(event.data);
+      return;
+    }
+
     const data = JSON.parse(event.data);
     if (data.type === "snapshot") {
       const snapshotAt = performance.now();
@@ -442,20 +479,13 @@ function connectSocket() {
         state.snapshotGap = Math.max(16, Math.min(140, snapshotAt - state.lastSnapshotAt));
       }
       state.lastSnapshotAt = snapshotAt;
-      state.players = data.players;
-      applyRuntimeConfig(data.config);
-      state.leaderboard = data.leaderboard || [];
-      const nextChats = data.chats || [];
-      handleIncomingChats(nextChats);
-      state.chats = nextChats;
-      state.foods = data.foods;
-      state.cacti = data.cacti || [];
-      state.wormholes = data.wormholes || [];
-      state.resetAt = Number(data.resetAt) || 0;
-      syncRenderPlayers(data.players, snapshotAt);
+      const nextPlayers = data.players || [];
+      state.players = nextPlayers;
+      applySnapshotObjects(data);
+      syncRenderPlayers(nextPlayers, snapshotAt);
       const me = state.renderPlayers.get(state.playerId);
       maybeShowBeneficialEffectMessage(previousMe, me);
-      const grouped = state.leaderboard.length > 0 ? state.leaderboard : aggregateOwners(data.players);
+      const grouped = state.leaderboard.length > 0 ? state.leaderboard : aggregateOwners(nextPlayers);
       const myOwnerId = me ? (me.ownerId || me.id) : state.playerId;
       const myGroup = grouped.find((entry) => entry.ownerId === myOwnerId);
       if (me) {
@@ -464,6 +494,35 @@ function connectSocket() {
       }
       renderLeaderboard();
       renderChat();
+      return;
+    }
+
+    if (data.type === "leaderboard") {
+      state.leaderboard = data.leaderboard || [];
+      renderLeaderboard();
+      return;
+    }
+
+    if (data.type === "chats") {
+      const nextChats = data.chats || [];
+      handleIncomingChats(nextChats);
+      state.chats = nextChats;
+      renderChat();
+      return;
+    }
+
+    if (data.type === "config") {
+      applyRuntimeConfig(data.config);
+      return;
+    }
+
+    if (data.type === "reset") {
+      state.resetAt = Number(data.resetAt) || 0;
+      return;
+    }
+
+    if (data.type === "stringTable") {
+      applyStringTableUpdate(data);
     }
   });
 
@@ -1126,6 +1185,291 @@ function drawBeneficialEffectRings(player, effects) {
   });
 }
 
+function applySnapshotObjects(data) {
+  const isFull = Boolean(data.full);
+  if (isFull) {
+    state.playerMap.clear();
+    state.foodMap.clear();
+    state.cactusMap.clear();
+    state.wormholeMap.clear();
+  }
+
+  applyObjectDelta(state.playerMap, data.players, data.removedPlayerIds);
+  applyObjectDelta(state.foodMap, data.foods, data.removedFoodIds);
+  applyObjectDelta(state.cactusMap, data.cacti, data.removedCactusIds);
+  applyObjectDelta(state.wormholeMap, data.wormholes, data.removedWormholeIds);
+
+  state.players = Array.from(state.playerMap.values());
+  state.foods = Array.from(state.foodMap.values());
+  state.cacti = Array.from(state.cactusMap.values());
+  state.wormholes = Array.from(state.wormholeMap.values());
+}
+
+function applyObjectDelta(targetMap, changedItems = [], removedIds = []) {
+  for (const id of removedIds || []) {
+    targetMap.delete(id);
+  }
+  for (const item of changedItems || []) {
+    if (!item || !item.id) {
+      continue;
+    }
+    targetMap.set(item.id, item);
+  }
+}
+
+function handleBinarySnapshot(bufferLike) {
+  const data = decodeSnapshotBinary(bufferLike);
+  if (!data) {
+    return;
+  }
+
+  const snapshotAt = performance.now();
+  const previousMe = state.renderPlayers.get(state.playerId);
+  if (state.lastSnapshotAt > 0) {
+    state.snapshotGap = Math.max(16, Math.min(140, snapshotAt - state.lastSnapshotAt));
+  }
+  state.lastSnapshotAt = snapshotAt;
+  applySnapshotObjects(data);
+  syncRenderPlayers(state.players, snapshotAt);
+  const me = state.renderPlayers.get(state.playerId);
+  maybeShowBeneficialEffectMessage(previousMe, me);
+  const grouped = state.leaderboard.length > 0 ? state.leaderboard : aggregateOwners(state.players);
+  const myOwnerId = me ? (me.ownerId || me.id) : state.playerId;
+  const myGroup = grouped.find((entry) => entry.ownerId === myOwnerId);
+  if (me) {
+    hudMass.textContent = isRespawningPlayer(me) ? `부활 ${Math.max(1, Math.ceil((me.respawnRemaining || 0) / 1000))}초` : Math.round(myGroup ? myGroup.mass : effectiveCombatMassClient(me));
+    updateAbilityHud(me);
+  }
+  renderLeaderboard();
+  renderChat();
+}
+
+function decodeSnapshotBinary(bufferLike) {
+  const buffer = bufferLike instanceof ArrayBuffer ? bufferLike : bufferLike?.buffer;
+  if (!buffer) {
+    return null;
+  }
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  if (
+    view.byteLength < 21 ||
+    view.getUint8(offset++) !== 83 ||
+    view.getUint8(offset++) !== 78 ||
+    view.getUint8(offset++) !== 80 ||
+    view.getUint8(offset++) !== 49
+  ) {
+    return null;
+  }
+
+  const flags = view.getUint8(offset++);
+  const full = (flags & 1) === 1;
+  const counts = [];
+  for (let i = 0; i < 8; i += 1) {
+    counts.push(view.getUint16(offset, true));
+    offset += 2;
+  }
+
+  const reader = {
+    view,
+    get offset() {
+      return offset;
+    },
+    set offset(value) {
+      offset = value;
+    },
+  };
+
+  const players = [];
+  for (let i = 0; i < counts[0]; i += 1) {
+    players.push(readBinaryPlayer(reader));
+  }
+  const removedPlayerIds = [];
+  for (let i = 0; i < counts[1]; i += 1) {
+    removedPlayerIds.push(readBinaryString(reader));
+  }
+  const foods = [];
+  for (let i = 0; i < counts[2]; i += 1) {
+    foods.push(readBinaryFood(reader));
+  }
+  const removedFoodIds = [];
+  for (let i = 0; i < counts[3]; i += 1) {
+    removedFoodIds.push(readBinaryString(reader));
+  }
+  const cacti = [];
+  for (let i = 0; i < counts[4]; i += 1) {
+    cacti.push(readBinaryCactus(reader));
+  }
+  const removedCactusIds = [];
+  for (let i = 0; i < counts[5]; i += 1) {
+    removedCactusIds.push(readBinaryString(reader));
+  }
+  const wormholes = [];
+  for (let i = 0; i < counts[6]; i += 1) {
+    wormholes.push(readBinaryWormhole(reader));
+  }
+  const removedWormholeIds = [];
+  for (let i = 0; i < counts[7]; i += 1) {
+    removedWormholeIds.push(readBinaryString(reader));
+  }
+
+  return {
+    type: "snapshot",
+    full,
+    players,
+    removedPlayerIds,
+    foods,
+    removedFoodIds,
+    cacti,
+    removedCactusIds,
+    wormholes,
+    removedWormholeIds,
+  };
+}
+
+function readBinaryPlayer(reader) {
+  const id = readBinaryString(reader);
+  const ownerId = readStringRef("ownerIds", readU16(reader));
+  const nickname = readStringRef("nicknames", readU16(reader));
+  const cellType = readStringRef("cellTypes", readU16(reader));
+  const abilityName = readStringRef("abilityNames", readU16(reader));
+  const color = readStringRef("colors", readU16(reader));
+  const x = readQuantU16(reader, COORD_QUANT_SCALE);
+  const y = readQuantU16(reader, COORD_QUANT_SCALE);
+  const mass = readQuantU32(reader, MASS_QUANT_SCALE);
+  const radius = readQuantU16(reader, RADIUS_QUANT_SCALE);
+  const scale = readQuantU16(reader, SCALE_QUANT_SCALE);
+  const isBot = readU8(reader) === 1;
+  const coins = readU16(reader);
+  const upgrades = decodeUpgradeBits(readU8(reader));
+  const cooldownRemaining = readU32(reader);
+  const effectRemaining = readU32(reader);
+  const shieldRemaining = readU32(reader);
+  const probioticRemaining = readU32(reader);
+  const speedBoostRemaining = readU32(reader);
+  const respawnRemaining = readU32(reader);
+  return {
+    id,
+    ownerId,
+    nickname,
+    cellType,
+    abilityName,
+    color,
+    x,
+    y,
+    mass,
+    radius,
+    scale,
+    isBot,
+    coins,
+    upgrades,
+    cooldownRemaining,
+    effectRemaining,
+    shieldRemaining,
+    probioticRemaining,
+    speedBoostRemaining,
+    respawnRemaining,
+  };
+}
+
+function applyStringTableUpdate(data) {
+  applyStringEntries(state.strings.ownerIds, data.ownerIds);
+  applyStringEntries(state.strings.nicknames, data.nicknames);
+  applyStringEntries(state.strings.colors, data.colors);
+  applyStringEntries(state.strings.abilityNames, data.abilityNames);
+  applyStringEntries(state.strings.cellTypes, data.cellTypes);
+}
+
+function applyStringEntries(targetMap, entries = []) {
+  for (const entry of entries || []) {
+    if (!entry) {
+      continue;
+    }
+    targetMap.set(Number(entry.id), entry.value || "");
+  }
+}
+
+function readStringRef(kind, id) {
+  return state.strings[kind].get(id) || "";
+}
+
+function readBinaryFood(reader) {
+  return {
+    id: readBinaryString(reader),
+    x: readQuantU16(reader, COORD_QUANT_SCALE),
+    y: readQuantU16(reader, COORD_QUANT_SCALE),
+    radius: readQuantU16(reader, RADIUS_QUANT_SCALE),
+    value: readQuantU16(reader, VALUE_QUANT_SCALE),
+    kind: readBinaryString(reader),
+  };
+}
+
+function readBinaryCactus(reader) {
+  return {
+    id: readBinaryString(reader),
+    x: readQuantU16(reader, COORD_QUANT_SCALE),
+    y: readQuantU16(reader, COORD_QUANT_SCALE),
+    size: readQuantU16(reader, RADIUS_QUANT_SCALE),
+    height: readQuantU16(reader, RADIUS_QUANT_SCALE),
+  };
+}
+
+function readBinaryWormhole(reader) {
+  return {
+    id: readBinaryString(reader),
+    kind: readBinaryString(reader),
+    pairId: readBinaryString(reader),
+    x: readQuantU16(reader, COORD_QUANT_SCALE),
+    y: readQuantU16(reader, COORD_QUANT_SCALE),
+    radius: readQuantU16(reader, RADIUS_QUANT_SCALE),
+    pullRange: readQuantU16(reader, RADIUS_QUANT_SCALE),
+  };
+}
+
+function readBinaryString(reader) {
+  const length = readU16(reader);
+  const bytes = new Uint8Array(reader.view.buffer, reader.offset, length);
+  reader.offset += length;
+  return snapshotTextDecoder.decode(bytes);
+}
+
+function readU8(reader) {
+  const value = reader.view.getUint8(reader.offset);
+  reader.offset += 1;
+  return value;
+}
+
+function readU16(reader) {
+  const value = reader.view.getUint16(reader.offset, true);
+  reader.offset += 2;
+  return value;
+}
+
+function readU32(reader) {
+  const value = reader.view.getUint32(reader.offset, true);
+  reader.offset += 4;
+  return value;
+}
+
+function readQuantU16(reader, scale) {
+  return readU16(reader) / scale;
+}
+
+function readQuantU32(reader, scale) {
+  return readU32(reader) / scale;
+}
+
+function decodeUpgradeBits(bits) {
+  return {
+    classic: (bits & (1 << 0)) !== 0,
+    blink: (bits & (1 << 1)) !== 0,
+    giant: (bits & (1 << 2)) !== 0,
+    shield: (bits & (1 << 3)) !== 0,
+    magnet: (bits & (1 << 4)) !== 0,
+    divider: (bits & (1 << 5)) !== 0,
+  };
+}
+
 function getFragmentDeformation(player) {
   const ownerId = player.ownerId || player.id;
   let nearest = null;
@@ -1233,8 +1577,7 @@ function renderChat() {
 
   chatMessages.innerHTML = items.map((entry) => `
     <div class="chat-entry ${entry.isBot ? "bot" : ""}">
-      <div class="chat-name">${escapeHtml(entry.nickname)}</div>
-      <div class="chat-text">${escapeHtml(entry.message)}</div>
+      <div class="chat-text"><span class="chat-name">${escapeHtml(entry.nickname)}</span>: ${escapeHtml(entry.message)}</div>
     </div>
   `).join("");
   chatMessages.scrollTop = chatMessages.scrollHeight;

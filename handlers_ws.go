@@ -82,6 +82,11 @@ func (s *gameState) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
+	if err := s.sendMetaTo(ws); err != nil {
+		s.dropConnection(playerID, ws)
+		return
+	}
+
 	if err := s.sendSnapshotTo(playerID, ws); err != nil {
 		s.dropConnection(playerID, ws)
 		return
@@ -262,6 +267,14 @@ func readClientFrame(conn net.Conn) ([]byte, byte, error) {
 }
 
 func (c *wsConn) writeText(payload []byte) error {
+	return c.writeFrame(0x81, payload)
+}
+
+func (c *wsConn) writeBinary(payload []byte) error {
+	return c.writeFrame(0x82, payload)
+}
+
+func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -270,7 +283,7 @@ func (c *wsConn) writeText(payload []byte) error {
 	}
 
 	frame := bytes.NewBuffer(nil)
-	frame.WriteByte(0x81)
+	frame.WriteByte(opcode)
 
 	length := len(payload)
 	switch {

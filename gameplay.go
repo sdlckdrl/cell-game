@@ -580,7 +580,7 @@ func (s *gameState) resolveOwnedMergesLocked(now time.Time) {
 						now.Sub(a.MergeReadyAt).Seconds(),
 						now.Sub(b.MergeReadyAt).Seconds(),
 					)
-					mergeDistanceRatio := 0.58 + clamp(elapsedAfterReady/5.8, 0, 1)*0.16
+					mergeDistanceRatio := 0.64 + clamp(elapsedAfterReady/5.8, 0, 1)*0.14
 					if distance(a.X, a.Y, b.X, b.Y) > (currentRadius(a)+currentRadius(b))*mergeDistanceRatio {
 						continue
 					}
@@ -637,18 +637,18 @@ func (s *gameState) applyOwnedCohesionLocked(now time.Time) {
 				mergePullBoost := 1.0
 				if now.Before(fragment.MergeReadyAt) {
 					progress := 1 - clamp(fragment.MergeReadyAt.Sub(now).Seconds()/dividerMergeDelay.Seconds(), 0, 1)
-					mergePullBoost = 0.04 + progress*0.96
+					mergePullBoost = 0.015 + progress*0.52
 				} else {
 					postReadyProgress := clamp(now.Sub(fragment.MergeReadyAt).Seconds()/5.8, 0, 1)
 					mergePullBoost = 1.48 + postReadyProgress*1.42
 				}
 				idleBoost := 2.25
 				if movementIntent < 0.18 {
-					idleBoost = 3.4
-				} else if movementIntent < 0.45 {
 					idleBoost = 2.55
+				} else if movementIntent < 0.45 {
+					idleBoost = 2.1
 				} else if movementIntent < 0.8 {
-					idleBoost = 2.05
+					idleBoost = 1.82
 				}
 				idleBoost *= mergePullBoost
 				pull := math.Min(108, distToCenter*0.25) * idleBoost / tickRate

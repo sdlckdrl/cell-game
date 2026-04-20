@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +27,7 @@ const (
 	playerStartMass          = 36.0
 	tickRate                 = 30
 	snapshotRate             = 15
+	metaRate                 = 2
 	playerTimeout            = 60 * time.Second
 	playerCullRange          = 1280.0
 	foodCullRange            = 1460.0
@@ -53,6 +56,12 @@ const (
 	spatialCellSize = 500.0
 	spatialGridCols = (int(maxWorldSize) / int(spatialCellSize)) + 1
 	spatialGridRows = spatialGridCols
+
+	coordQuantScale = 8.0
+	radiusQuantScale = 8.0
+	valueQuantScale = 16.0
+	scaleQuantScale = 1024.0
+	massQuantScale = 16.0
 )
 
 var mimeTypes = map[string]string{
@@ -71,6 +80,10 @@ type gameState struct {
 	chats                  []chatEntry
 	config                 runtimeConfig
 	spatialCache           *spatialGrid
+	lastLeaderboardPayload []byte
+	lastChatsPayload       []byte
+	lastConfigPayload      []byte
+	lastResetPayload       []byte
 	lastCactusRelocation   time.Time
 	lastWormholeRelocation time.Time
 	lastProbioticSpawn     time.Time
@@ -200,15 +213,36 @@ type inputMessage struct {
 }
 
 type snapshotMessage struct {
+	Type               string      `json:"type"`
+	Full               bool        `json:"full,omitempty"`
+	Players            []*player   `json:"players"`
+	RemovedPlayerIDs   []string    `json:"removedPlayerIds,omitempty"`
+	Foods              []*food     `json:"foods,omitempty"`
+	Cacti              []*cactus   `json:"cacti,omitempty"`
+	Wormholes          []*wormhole `json:"wormholes,omitempty"`
+	RemovedFoodIDs     []string    `json:"removedFoodIds,omitempty"`
+	RemovedCactusIDs   []string    `json:"removedCactusIds,omitempty"`
+	RemovedWormholeIDs []string    `json:"removedWormholeIds,omitempty"`
+}
+
+type leaderboardMessage struct {
 	Type        string         `json:"type"`
-	Players     []*player      `json:"players"`
-	Foods       []*food        `json:"foods"`
-	Cacti       []*cactus      `json:"cacti"`
-	Wormholes   []*wormhole    `json:"wormholes"`
 	Leaderboard []ownerSummary `json:"leaderboard"`
-	Chats       []chatEntry    `json:"chats"`
-	Config      runtimeConfig  `json:"config"`
-	ResetAt     int64          `json:"resetAt"`
+}
+
+type chatsMessage struct {
+	Type  string      `json:"type"`
+	Chats []chatEntry `json:"chats"`
+}
+
+type configMessage struct {
+	Type   string        `json:"type"`
+	Config runtimeConfig `json:"config"`
+}
+
+type resetMessage struct {
+	Type    string `json:"type"`
+	ResetAt int64  `json:"resetAt"`
 }
 
 type ownerSummary struct {
@@ -251,8 +285,46 @@ type superAdminConfig struct {
 }
 
 type wsConn struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn    net.Conn
+	mu      sync.Mutex
+	stateMu sync.Mutex
+	cache   snapshotDeltaCache
+	strings connectionStringTable
+}
+
+type snapshotDeltaCache struct {
+	fullSent  bool
+	players   map[string]uint64
+	foods     map[string]uint64
+	cacti     map[string]uint64
+	wormholes map[string]uint64
+}
+
+type connectionStringTable struct {
+	ownerIDs       map[string]uint16
+	nicknames      map[string]uint16
+	colors         map[string]uint16
+	abilities      map[string]uint16
+	cellTypes      map[string]uint16
+	nextOwnerID    uint16
+	nextNicknameID uint16
+	nextColorID    uint16
+	nextAbilityID  uint16
+	nextCellTypeID uint16
+}
+
+type stringTableEntry struct {
+	ID    uint16 `json:"id"`
+	Value string `json:"value"`
+}
+
+type stringTableMessage struct {
+	Type         string             `json:"type"`
+	OwnerIDs     []stringTableEntry `json:"ownerIds,omitempty"`
+	Nicknames    []stringTableEntry `json:"nicknames,omitempty"`
+	Colors       []stringTableEntry `json:"colors,omitempty"`
+	AbilityNames []stringTableEntry `json:"abilityNames,omitempty"`
+	CellTypes    []stringTableEntry `json:"cellTypes,omitempty"`
 }
 
 // ----------------------------------------------------
@@ -345,6 +417,7 @@ func (s *gameState) runWorld() {
 	ticker := time.NewTicker(time.Second / tickRate)
 	defer ticker.Stop()
 	snapshotInterval := maxInt(1, tickRate/maxInt(1, snapshotRate))
+	metaInterval := maxInt(1, tickRate/maxInt(1, metaRate))
 	tickCount := 0
 
 	for range ticker.C {
@@ -352,6 +425,9 @@ func (s *gameState) runWorld() {
 		tickCount++
 		if tickCount%snapshotInterval == 0 {
 			s.broadcastSnapshot()
+		}
+		if tickCount%metaInterval == 0 {
+			s.broadcastMeta()
 		}
 	}
 }
@@ -577,8 +653,6 @@ func (s *gameState) broadcastSnapshot() {
 		grid.wormholes[cx][cy] = append(grid.wormholes[cx][cy], w)
 	}
 
-	leaderboard := buildOwnerLeaderboard(s.players)
-
 	// 2. 소유자(Owner)별 중심점 사전 계산 (루프 내 중복 연산 방지)
 	type centerMass struct {
 		x, y, totalMass float64
@@ -605,9 +679,6 @@ func (s *gameState) broadcastSnapshot() {
 		message snapshotMessage
 	}
 	var targets []snapshotTarget
-	chats := cloneChats(s.chats)
-	config := s.config
-	resetAt := s.nextWorldResetAt.UnixMilli()
 
 	// 3. 접속 중인 유저별로 타겟 페이로드 생성
 	for _, viewer := range s.players {
@@ -679,49 +750,173 @@ func (s *gameState) broadcastSnapshot() {
 
 		targets = append(targets, snapshotTarget{
 			conn: viewer.Conn,
-			message: snapshotMessage{
-				Type:        "snapshot",
-				Players:     players,
-				Foods:       foods,
-				Cacti:       cacti,
-				Wormholes:   wormholes,
-				Leaderboard: leaderboard,
-				Chats:       chats,
-				Config:      config,
-				ResetAt:     resetAt,
-			},
+			message: s.buildDeltaSnapshotMessage(viewer.Conn, players, foods, cacti, wormholes, false),
 		})
 	}
 	s.mu.RUnlock() // JSON 생성 후 ReadLock 조기 해제
 
 	// 5. 실제 웹소켓 전송 (락 해제 상태에서 수행)
 	for _, target := range targets {
-		payload, err := json.Marshal(target.message)
+		tablePayload, err := target.conn.buildStringTablePayloadForPlayers(target.message.Players)
 		if err != nil {
 			continue
 		}
-		if err := target.conn.writeText(payload); err != nil {
+		if len(tablePayload) > 0 {
+			if err := target.conn.writeText(tablePayload); err != nil {
+				target.conn.close()
+				continue
+			}
+		}
+		payload, err := encodeSnapshotBinary(target.conn, target.message)
+		if err != nil {
+			continue
+		}
+		if err := target.conn.writeBinary(payload); err != nil {
 			target.conn.close()
 		}
 	}
 }
 
+func (s *gameState) broadcastMeta() {
+	s.mu.RLock()
+	targets := make([]*wsConn, 0, len(s.players))
+	for _, p := range s.players {
+		if p.Conn != nil {
+			targets = append(targets, p.Conn)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, builder := range []func() ([]byte, bool, error){
+		s.buildLeaderboardPayloadIfChanged,
+		s.buildChatsPayloadIfChanged,
+		s.buildConfigPayloadIfChanged,
+		s.buildResetPayloadIfChanged,
+	} {
+		payload, changed, err := builder()
+		if err != nil || !changed || len(payload) == 0 {
+			continue
+		}
+		for _, conn := range targets {
+			if err := conn.writeText(payload); err != nil {
+				conn.close()
+			}
+		}
+	}
+}
+
+func (s *gameState) sendMetaTo(conn *wsConn) error {
+	for _, builder := range []func() ([]byte, error){
+		s.buildLeaderboardPayload,
+		s.buildChatsPayload,
+		s.buildConfigPayload,
+		s.buildResetPayload,
+	} {
+		payload, err := builder()
+		if err != nil {
+			return err
+		}
+		if len(payload) == 0 {
+			continue
+		}
+		if err := conn.writeText(payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *gameState) sendSnapshotTo(playerID string, conn *wsConn) error {
-	payload, err := s.buildSnapshotPayload(playerID)
+	tablePayload, payload, err := s.buildSnapshotPayload(playerID, conn)
 	if err != nil {
 		return err
 	}
-	return conn.writeText(payload)
+	if len(tablePayload) > 0 {
+		if err := conn.writeText(tablePayload); err != nil {
+			return err
+		}
+	}
+	return conn.writeBinary(payload)
+}
+
+func (s *gameState) buildLeaderboardPayload() ([]byte, error) {
+	s.mu.RLock()
+	message := leaderboardMessage{
+		Type:        "leaderboard",
+		Leaderboard: buildOwnerLeaderboard(s.players),
+	}
+	s.mu.RUnlock()
+	return json.Marshal(message)
+}
+
+func (s *gameState) buildChatsPayload() ([]byte, error) {
+	s.mu.RLock()
+	message := chatsMessage{
+		Type:  "chats",
+		Chats: cloneChats(s.chats),
+	}
+	s.mu.RUnlock()
+	return json.Marshal(message)
+}
+
+func (s *gameState) buildConfigPayload() ([]byte, error) {
+	s.mu.RLock()
+	message := configMessage{
+		Type:   "config",
+		Config: s.config,
+	}
+	s.mu.RUnlock()
+	return json.Marshal(message)
+}
+
+func (s *gameState) buildResetPayload() ([]byte, error) {
+	s.mu.RLock()
+	message := resetMessage{
+		Type:    "reset",
+		ResetAt: s.nextWorldResetAt.UnixMilli(),
+	}
+	s.mu.RUnlock()
+	return json.Marshal(message)
+}
+
+func (s *gameState) buildLeaderboardPayloadIfChanged() ([]byte, bool, error) {
+	return s.payloadIfChanged(s.buildLeaderboardPayload, &s.lastLeaderboardPayload)
+}
+
+func (s *gameState) buildChatsPayloadIfChanged() ([]byte, bool, error) {
+	return s.payloadIfChanged(s.buildChatsPayload, &s.lastChatsPayload)
+}
+
+func (s *gameState) buildConfigPayloadIfChanged() ([]byte, bool, error) {
+	return s.payloadIfChanged(s.buildConfigPayload, &s.lastConfigPayload)
+}
+
+func (s *gameState) buildResetPayloadIfChanged() ([]byte, bool, error) {
+	return s.payloadIfChanged(s.buildResetPayload, &s.lastResetPayload)
+}
+
+func (s *gameState) payloadIfChanged(builder func() ([]byte, error), last *[]byte) ([]byte, bool, error) {
+	payload, err := builder()
+	if err != nil {
+		return nil, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bytes.Equal(*last, payload) {
+		return nil, false, nil
+	}
+	*last = append((*last)[:0], payload...)
+	return payload, true, nil
 }
 
 // 최초 1회 Join 시 호출되는 단일 페이로드 생성 로직 (기존 로직 유지)
-func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
+func (s *gameState) buildSnapshotPayload(playerID string, conn *wsConn) ([]byte, []byte, error) {
 	s.mu.RLock()
 	snapshotNow := time.Now()
 	viewer, ok := s.players[playerID]
 	if !ok {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("viewer not found")
+		return nil, nil, fmt.Errorf("viewer not found")
 	}
 	viewerOwnerID := ownerIDOf(viewer)
 	ownerFragments := buildOwnerFragmentsIndex(s.players)
@@ -769,23 +964,507 @@ func (s *gameState) buildSnapshotPayload(playerID string) ([]byte, error) {
 		copyHole := *hole
 		wormholes = append(wormholes, &copyHole)
 	}
-	leaderboard := buildOwnerLeaderboard(s.players)
-	chats := cloneChats(s.chats)
-	config := s.config
-	resetAt := s.nextWorldResetAt.UnixMilli()
 	s.mu.RUnlock()
 
-	return json.Marshal(snapshotMessage{
-		Type:        "snapshot",
-		Players:     players,
-		Foods:       foods,
-		Cacti:       cacti,
-		Wormholes:   wormholes,
-		Leaderboard: leaderboard,
-		Chats:       chats,
-		Config:      config,
-		ResetAt:     resetAt,
-	})
+	message := s.buildDeltaSnapshotMessage(conn, players, foods, cacti, wormholes, true)
+	tablePayload, err := conn.buildStringTablePayloadForPlayers(message.Players)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload, err := encodeSnapshotBinary(conn, message)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tablePayload, payload, nil
+}
+
+func (s *gameState) buildDeltaSnapshotMessage(conn *wsConn, players []*player, foods []*food, cacti []*cactus, wormholes []*wormhole, forceFull bool) snapshotMessage {
+	playerDelta, foodDelta, cactusDelta, wormholeDelta, full := conn.computeSnapshotDelta(players, foods, cacti, wormholes, forceFull)
+	return snapshotMessage{
+		Type:               "snapshot",
+		Full:               full,
+		Players:            playerDelta.changed,
+		RemovedPlayerIDs:   playerDelta.removedIDs,
+		Foods:              foodDelta.changed,
+		Cacti:              cactusDelta.changed,
+		Wormholes:          wormholeDelta.changed,
+		RemovedFoodIDs:     foodDelta.removedIDs,
+		RemovedCactusIDs:   cactusDelta.removedIDs,
+		RemovedWormholeIDs: wormholeDelta.removedIDs,
+	}
+}
+
+type objectDelta[T any] struct {
+	changed    []*T
+	removedIDs []string
+}
+
+func (c *wsConn) computeSnapshotDelta(players []*player, foods []*food, cacti []*cactus, wormholes []*wormhole, forceFull bool) (objectDelta[player], objectDelta[food], objectDelta[cactus], objectDelta[wormhole], bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	full := forceFull || !c.cache.fullSent
+	if full {
+		c.cache.fullSent = true
+	}
+
+	playerDelta := diffPlayerSet(&c.cache.players, players, full)
+	foodDelta := diffFoodSet(&c.cache.foods, foods, full)
+	cactusDelta := diffCactusSet(&c.cache.cacti, cacti, full)
+	wormholeDelta := diffWormholeSet(&c.cache.wormholes, wormholes, full)
+	return playerDelta, foodDelta, cactusDelta, wormholeDelta, full
+}
+
+func diffPlayerSet(cache *map[string]uint64, current []*player, full bool) objectDelta[player] {
+	previous := *cache
+	next := make(map[string]uint64, len(current))
+	changed := make([]*player, 0, len(current))
+	if full {
+		previous = nil
+	}
+
+	for _, item := range current {
+		signature := playerSignature(item)
+		next[item.ID] = signature
+		if full || previous == nil || previous[item.ID] != signature {
+			changed = append(changed, item)
+		}
+	}
+
+	removed := diffRemovedIDs(previous, next)
+	*cache = next
+	return objectDelta[player]{changed: changed, removedIDs: removed}
+}
+
+func diffFoodSet(cache *map[string]uint64, current []*food, full bool) objectDelta[food] {
+	previous := *cache
+	next := make(map[string]uint64, len(current))
+	changed := make([]*food, 0, len(current))
+	if full {
+		previous = nil
+	}
+
+	for _, item := range current {
+		signature := foodSignature(item)
+		next[item.ID] = signature
+		if full || previous == nil || previous[item.ID] != signature {
+			changed = append(changed, item)
+		}
+	}
+
+	removed := diffRemovedIDs(previous, next)
+	*cache = next
+	return objectDelta[food]{changed: changed, removedIDs: removed}
+}
+
+func diffCactusSet(cache *map[string]uint64, current []*cactus, full bool) objectDelta[cactus] {
+	previous := *cache
+	next := make(map[string]uint64, len(current))
+	changed := make([]*cactus, 0, len(current))
+	if full {
+		previous = nil
+	}
+
+	for _, item := range current {
+		signature := cactusSignature(item)
+		next[item.ID] = signature
+		if full || previous == nil || previous[item.ID] != signature {
+			changed = append(changed, item)
+		}
+	}
+
+	removed := diffRemovedIDs(previous, next)
+	*cache = next
+	return objectDelta[cactus]{changed: changed, removedIDs: removed}
+}
+
+func diffWormholeSet(cache *map[string]uint64, current []*wormhole, full bool) objectDelta[wormhole] {
+	previous := *cache
+	next := make(map[string]uint64, len(current))
+	changed := make([]*wormhole, 0, len(current))
+	if full {
+		previous = nil
+	}
+
+	for _, item := range current {
+		signature := wormholeSignature(item)
+		next[item.ID] = signature
+		if full || previous == nil || previous[item.ID] != signature {
+			changed = append(changed, item)
+		}
+	}
+
+	removed := diffRemovedIDs(previous, next)
+	*cache = next
+	return objectDelta[wormhole]{changed: changed, removedIDs: removed}
+}
+
+func diffRemovedIDs(previous map[string]uint64, next map[string]uint64) []string {
+	if len(previous) == 0 {
+		return nil
+	}
+	removed := make([]string, 0)
+	for id := range previous {
+		if _, ok := next[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	return removed
+}
+
+func playerSignature(item *player) uint64 {
+	signature := uint64(1469598103934665603)
+	signature = mixStringSignature(signature, item.OwnerID)
+	signature = mixStringSignature(signature, item.Nickname)
+	signature = mixStringSignature(signature, item.CellType)
+	signature = mixStringSignature(signature, item.Ability)
+	signature = mixStringSignature(signature, item.Color)
+	signature = mixSignature(signature, quantizeSignature(item.X))
+	signature = mixSignature(signature, quantizeSignature(item.Y))
+	signature = mixSignature(signature, quantizeSignature(item.Mass))
+	signature = mixSignature(signature, quantizeSignature(item.Radius))
+	signature = mixSignature(signature, quantizeSignature(item.Scale))
+	signature = mixSignature(signature, uint64(item.CooldownRemaining))
+	signature = mixSignature(signature, uint64(item.EffectRemaining))
+	signature = mixSignature(signature, uint64(item.ShieldRemaining))
+	signature = mixSignature(signature, uint64(item.ProbioticRemaining))
+	signature = mixSignature(signature, uint64(item.SpeedBoostRemaining))
+	signature = mixSignature(signature, uint64(item.RespawnRemaining))
+	signature = mixSignature(signature, uint64(item.Coins))
+	signature = mixSignature(signature, uint64(upgradeBits(item.Upgrades)))
+	if item.IsBot {
+		signature = mixSignature(signature, 1)
+	}
+	return signature
+}
+
+func foodSignature(item *food) uint64 {
+	signature := uint64(1469598103934665603)
+	signature = mixSignature(signature, quantizeSignature(item.X))
+	signature = mixSignature(signature, quantizeSignature(item.Y))
+	signature = mixSignature(signature, quantizeSignature(item.Radius))
+	signature = mixSignature(signature, quantizeSignature(item.Value))
+	return mixStringSignature(signature, item.Kind)
+}
+
+func cactusSignature(item *cactus) uint64 {
+	signature := uint64(1469598103934665603)
+	signature = mixSignature(signature, quantizeSignature(item.X))
+	signature = mixSignature(signature, quantizeSignature(item.Y))
+	signature = mixSignature(signature, quantizeSignature(item.Size))
+	return mixSignature(signature, quantizeSignature(item.Height))
+}
+
+func wormholeSignature(item *wormhole) uint64 {
+	signature := uint64(1469598103934665603)
+	signature = mixSignature(signature, quantizeSignature(item.X))
+	signature = mixSignature(signature, quantizeSignature(item.Y))
+	signature = mixSignature(signature, quantizeSignature(item.Radius))
+	signature = mixSignature(signature, quantizeSignature(item.PullRange))
+	signature = mixStringSignature(signature, item.Kind)
+	return mixStringSignature(signature, item.PairID)
+}
+
+func quantizeSignature(value float64) uint64 {
+	return uint64(int64(math.Round(value * 100)))
+}
+
+func mixSignature(signature uint64, value uint64) uint64 {
+	return (signature ^ value) * 1099511628211
+}
+
+func mixStringSignature(signature uint64, value string) uint64 {
+	for i := 0; i < len(value); i++ {
+		signature = mixSignature(signature, uint64(value[i]))
+	}
+	return signature
+}
+
+func upgradeBits(upgrades upgradeState) byte {
+	var bits byte
+	if upgrades.Classic {
+		bits |= 1 << 0
+	}
+	if upgrades.Blink {
+		bits |= 1 << 1
+	}
+	if upgrades.Giant {
+		bits |= 1 << 2
+	}
+	if upgrades.Shield {
+		bits |= 1 << 3
+	}
+	if upgrades.Magnet {
+		bits |= 1 << 4
+	}
+	if upgrades.Divider {
+		bits |= 1 << 5
+	}
+	return bits
+}
+
+func encodeSnapshotBinary(conn *wsConn, message snapshotMessage) ([]byte, error) {
+	buf := bytes.NewBuffer(make([]byte, 0, 2048))
+	buf.Write([]byte{'S', 'N', 'P', '1'})
+
+	var flags byte
+	if message.Full {
+		flags |= 1
+	}
+	buf.WriteByte(flags)
+
+	counts := []int{
+		len(message.Players),
+		len(message.RemovedPlayerIDs),
+		len(message.Foods),
+		len(message.RemovedFoodIDs),
+		len(message.Cacti),
+		len(message.RemovedCactusIDs),
+		len(message.Wormholes),
+		len(message.RemovedWormholeIDs),
+	}
+	for _, count := range counts {
+		if err := writeU16(buf, count); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, player := range message.Players {
+		if err := writePlayerBinary(buf, conn, player); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range message.RemovedPlayerIDs {
+		if err := writeStringBinary(buf, id); err != nil {
+			return nil, err
+		}
+	}
+	for _, food := range message.Foods {
+		if err := writeFoodBinary(buf, food); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range message.RemovedFoodIDs {
+		if err := writeStringBinary(buf, id); err != nil {
+			return nil, err
+		}
+	}
+	for _, cactus := range message.Cacti {
+		if err := writeCactusBinary(buf, cactus); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range message.RemovedCactusIDs {
+		if err := writeStringBinary(buf, id); err != nil {
+			return nil, err
+		}
+	}
+	for _, wormhole := range message.Wormholes {
+		if err := writeWormholeBinary(buf, wormhole); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range message.RemovedWormholeIDs {
+		if err := writeStringBinary(buf, id); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+func writePlayerBinary(buf *bytes.Buffer, conn *wsConn, player *player) error {
+	if err := writeStringBinary(buf, player.ID); err != nil {
+		return err
+	}
+	writeU16Unsafe(buf, conn.stringID("owner", player.OwnerID))
+	writeU16Unsafe(buf, conn.stringID("nickname", player.Nickname))
+	writeU16Unsafe(buf, conn.stringID("cellType", player.CellType))
+	writeU16Unsafe(buf, conn.stringID("ability", player.Ability))
+	writeU16Unsafe(buf, conn.stringID("color", player.Color))
+	writeQuantU16(buf, player.X, coordQuantScale)
+	writeQuantU16(buf, player.Y, coordQuantScale)
+	writeQuantU32(buf, player.Mass, massQuantScale)
+	writeQuantU16(buf, player.Radius, radiusQuantScale)
+	writeQuantU16(buf, player.Scale, scaleQuantScale)
+	if player.IsBot {
+		buf.WriteByte(1)
+	} else {
+		buf.WriteByte(0)
+	}
+	if err := writeU16(buf, player.Coins); err != nil {
+		return err
+	}
+	buf.WriteByte(upgradeBits(player.Upgrades))
+	writeU32(buf, player.CooldownRemaining)
+	writeU32(buf, player.EffectRemaining)
+	writeU32(buf, player.ShieldRemaining)
+	writeU32(buf, player.ProbioticRemaining)
+	writeU32(buf, player.SpeedBoostRemaining)
+	writeU32(buf, player.RespawnRemaining)
+	return nil
+}
+
+func (c *wsConn) buildStringTablePayloadForPlayers(players []*player) ([]byte, error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	msg := stringTableMessage{Type: "stringTable"}
+	for _, player := range players {
+		c.appendStringUpdate(&msg.OwnerIDs, &c.strings.ownerIDs, &c.strings.nextOwnerID, player.OwnerID)
+		c.appendStringUpdate(&msg.Nicknames, &c.strings.nicknames, &c.strings.nextNicknameID, player.Nickname)
+		c.appendStringUpdate(&msg.CellTypes, &c.strings.cellTypes, &c.strings.nextCellTypeID, player.CellType)
+		c.appendStringUpdate(&msg.AbilityNames, &c.strings.abilities, &c.strings.nextAbilityID, player.Ability)
+		c.appendStringUpdate(&msg.Colors, &c.strings.colors, &c.strings.nextColorID, player.Color)
+	}
+
+	if len(msg.OwnerIDs) == 0 && len(msg.Nicknames) == 0 && len(msg.CellTypes) == 0 && len(msg.AbilityNames) == 0 && len(msg.Colors) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(msg)
+}
+
+func (c *wsConn) appendStringUpdate(entries *[]stringTableEntry, table *map[string]uint16, nextID *uint16, value string) {
+	if *table == nil {
+		*table = make(map[string]uint16)
+	}
+	if _, exists := (*table)[value]; exists {
+		return
+	}
+	*nextID = *nextID + 1
+	(*table)[value] = *nextID
+	*entries = append(*entries, stringTableEntry{ID: *nextID, Value: value})
+}
+
+func (c *wsConn) stringID(kind string, value string) uint16 {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	switch kind {
+	case "owner":
+		return ensureStringID(&c.strings.ownerIDs, &c.strings.nextOwnerID, value)
+	case "nickname":
+		return ensureStringID(&c.strings.nicknames, &c.strings.nextNicknameID, value)
+	case "cellType":
+		return ensureStringID(&c.strings.cellTypes, &c.strings.nextCellTypeID, value)
+	case "ability":
+		return ensureStringID(&c.strings.abilities, &c.strings.nextAbilityID, value)
+	case "color":
+		return ensureStringID(&c.strings.colors, &c.strings.nextColorID, value)
+	default:
+		return 0
+	}
+}
+
+func ensureStringID(table *map[string]uint16, nextID *uint16, value string) uint16 {
+	if *table == nil {
+		*table = make(map[string]uint16)
+	}
+	if id, exists := (*table)[value]; exists {
+		return id
+	}
+	*nextID = *nextID + 1
+	(*table)[value] = *nextID
+	return *nextID
+}
+
+func writeFoodBinary(buf *bytes.Buffer, item *food) error {
+	if err := writeStringBinary(buf, item.ID); err != nil {
+		return err
+	}
+	writeQuantU16(buf, item.X, coordQuantScale)
+	writeQuantU16(buf, item.Y, coordQuantScale)
+	writeQuantU16(buf, item.Radius, radiusQuantScale)
+	writeQuantU16(buf, item.Value, valueQuantScale)
+	return writeStringBinary(buf, item.Kind)
+}
+
+func writeCactusBinary(buf *bytes.Buffer, item *cactus) error {
+	if err := writeStringBinary(buf, item.ID); err != nil {
+		return err
+	}
+	writeQuantU16(buf, item.X, coordQuantScale)
+	writeQuantU16(buf, item.Y, coordQuantScale)
+	writeQuantU16(buf, item.Size, radiusQuantScale)
+	writeQuantU16(buf, item.Height, radiusQuantScale)
+	return nil
+}
+
+func writeWormholeBinary(buf *bytes.Buffer, item *wormhole) error {
+	if err := writeStringBinary(buf, item.ID); err != nil {
+		return err
+	}
+	if err := writeStringBinary(buf, item.Kind); err != nil {
+		return err
+	}
+	if err := writeStringBinary(buf, item.PairID); err != nil {
+		return err
+	}
+	writeQuantU16(buf, item.X, coordQuantScale)
+	writeQuantU16(buf, item.Y, coordQuantScale)
+	writeQuantU16(buf, item.Radius, radiusQuantScale)
+	writeQuantU16(buf, item.PullRange, radiusQuantScale)
+	return nil
+}
+
+func writeStringBinary(buf *bytes.Buffer, value string) error {
+	if err := writeU16(buf, len(value)); err != nil {
+		return err
+	}
+	_, err := buf.WriteString(value)
+	return err
+}
+
+func writeU16(buf *bytes.Buffer, value int) error {
+	if value < 0 || value > math.MaxUint16 {
+		return fmt.Errorf("value out of uint16 range: %d", value)
+	}
+	writeU16Unsafe(buf, uint16(value))
+	return nil
+}
+
+func writeU16Unsafe(buf *bytes.Buffer, value uint16) {
+	var raw [2]byte
+	binary.LittleEndian.PutUint16(raw[:], value)
+	buf.Write(raw[:])
+}
+
+func writeU32(buf *bytes.Buffer, value int64) {
+	if value < 0 {
+		value = 0
+	}
+	if value > math.MaxUint32 {
+		value = math.MaxUint32
+	}
+	var raw [4]byte
+	binary.LittleEndian.PutUint32(raw[:], uint32(value))
+	buf.Write(raw[:])
+}
+
+func writeQuantU16(buf *bytes.Buffer, value float64, scale float64) {
+	writeU16Unsafe(buf, quantizeToU16(value, scale))
+}
+
+func writeQuantU32(buf *bytes.Buffer, value float64, scale float64) {
+	var raw [4]byte
+	binary.LittleEndian.PutUint32(raw[:], quantizeToU32(value, scale))
+	buf.Write(raw[:])
+}
+
+func quantizeToU16(value float64, scale float64) uint16 {
+	scaled := math.Round(math.Max(0, value) * scale)
+	if scaled > math.MaxUint16 {
+		scaled = math.MaxUint16
+	}
+	return uint16(scaled)
+}
+
+func quantizeToU32(value float64, scale float64) uint32 {
+	scaled := math.Round(math.Max(0, value) * scale)
+	if scaled > math.MaxUint32 {
+		scaled = math.MaxUint32
+	}
+	return uint32(scaled)
 }
 
 func (s *gameState) seedFoods() {

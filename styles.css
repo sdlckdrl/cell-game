@@ -151,6 +151,16 @@ input {
   border-radius: 24px;
 }
 
+.left-sidebar {
+  position: fixed;
+  top: 18px;
+  left: 18px;
+  z-index: 4;
+  display: grid;
+  gap: 12px;
+  align-items: start;
+}
+
 #loginScreen .panel {
   margin: auto 0;
 }
@@ -268,20 +278,21 @@ input {
 }
 
 .hud {
-  position: fixed;
-  top: 18px;
-  left: 18px;
-  z-index: 3;
+  position: relative;
+  top: auto;
+  left: auto;
+  z-index: auto;
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+  align-items: start;
 }
 
 .upgrade-panel {
-  position: fixed;
-  left: 18px;
-  bottom: 18px;
-  z-index: 3;
+  position: relative;
+  left: auto;
+  bottom: auto;
+  z-index: auto;
   width: min(320px, calc(100vw - 36px));
   display: grid;
   gap: 10px;
@@ -532,14 +543,15 @@ body.touch-device .minimap {
 }
 
 body.touch-device .hud {
-  top: 10px;
-  left: 10px;
+  position: relative;
+  top: auto;
+  left: auto;
   gap: 0;
 }
 
 body.touch-device .upgrade-panel {
-  left: 10px;
-  bottom: 116px;
+  left: auto;
+  bottom: auto;
   width: min(240px, calc(100vw - 132px));
   gap: 8px;
   padding: 10px 12px;
@@ -570,6 +582,12 @@ body.touch-device .upgrade-buy {
 
 body.touch-device .hud-summary {
   display: none;
+}
+
+body.touch-device .left-sidebar {
+  top: 10px;
+  left: 10px;
+  gap: 8px;
 }
 
 body.touch-device .hud-ability {
@@ -834,6 +852,7 @@ body.touch-device .minimap.collapsed {
   color: var(--accent);
   font-size: 0.82rem;
   font-weight: 700;
+  margin-right: 4px;
 }
 
 .chat-text {

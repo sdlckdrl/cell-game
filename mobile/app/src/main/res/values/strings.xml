@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">세포키우기</string>
+    <string name="retry">다시 시도</string>
+    <string name="web_error_title">게임에 연결할 수 없습니다</string>
+    <string name="web_error_generic">웹뷰에서 게임 페이지를 불러오지 못했습니다. 서버 주소와 네트워크 상태를 확인해 주세요.</string>
+    <string name="web_error_http">서버가 HTTP %1$d 응답을 반환했습니다.</string>
+    <string name="web_error_ssl">SSL 인증서 확인에 실패했습니다. 배포 주소가 HTTPS로 올바르게 설정되어 있는지 확인해 주세요.</string>
+    <string name="web_error_invalid_url">앱에 설정된 주소가 올바르지 않습니다: %1$s</string>
+    <string name="web_error_release_placeholder">`app-url.properties`의 `releaseBaseUrl`을 실제 배포 주소로 바꾼 뒤 다시 빌드해 주세요.</string>
+</resources>

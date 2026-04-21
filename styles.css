@@ -751,6 +751,32 @@ body.touch-device .minimap.collapsed {
   z-index: 3;
 }
 
+.chat-toast {
+  position: fixed;
+  left: 50%;
+  top: 28px;
+  transform: translateX(-50%);
+  z-index: 5;
+  width: min(560px, calc(100vw - 40px));
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  pointer-events: none;
+}
+
+.chat-toast-line {
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  text-align: center;
+  text-shadow:
+    0 2px 14px rgba(0, 0, 0, 0.68),
+    0 0 4px rgba(0, 0, 0, 0.78);
+  word-break: break-word;
+}
+
 .chat-panel {
   position: fixed;
   left: 50%;
@@ -778,7 +804,7 @@ body.touch-device .minimap.collapsed {
 
 .chat-body {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .chat-panel {
@@ -832,14 +858,14 @@ body.touch-device .minimap.collapsed {
   max-height: 220px;
   overflow-y: auto;
   display: grid;
-  gap: 8px;
+  gap: 4px;
   padding-right: 4px;
 }
 
 .chat-entry {
   display: grid;
-  gap: 3px;
-  padding: 8px 10px;
+  gap: 1px;
+  padding: 6px 8px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
 }
@@ -857,7 +883,7 @@ body.touch-device .minimap.collapsed {
 
 .chat-text {
   color: var(--text);
-  line-height: 1.35;
+  line-height: 1.18;
   word-break: break-word;
 }
 
@@ -1063,6 +1089,11 @@ body.touch-device .touch-controls {
     left: 18px;
     right: 18px;
     transform: none;
+  }
+
+  .chat-toast {
+    top: 18px;
+    width: calc(100vw - 28px);
   }
 
   .chat-panel {

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="game_background">#08111F</color>
+    <color name="brand_accent">#53D8FB</color>
+    <color name="brand_accent_dark">#0C7EB3</color>
+    <color name="brand_accent_track">#163043</color>
+    <color name="panel_background">#D9162438</color>
+    <color name="panel_stroke">#334D6E</color>
+    <color name="ic_launcher_background">#08111F</color>
+</resources>
+

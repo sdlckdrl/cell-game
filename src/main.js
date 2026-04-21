@@ -31,6 +31,7 @@ const fullscreenDismiss = document.getElementById("fullscreenDismiss");
 const rotatePrompt = document.getElementById("rotatePrompt");
 const resetNotice = document.getElementById("resetNotice");
 const messageBox = document.getElementById("message");
+const chatToast = document.getElementById("chatToast");
 const hudName = document.getElementById("hudName");
 const hudCellType = document.getElementById("hudCellType");
 const hudMass = document.getElementById("hudMass");
@@ -196,7 +197,7 @@ const state = {
   minimapCollapsed: false,
   chatCollapsed: true,
   chatLastActivityAt: 0,
-  chatPreviewUntil: 0,
+  chatToasts: [],
   lastLeaderboardKey: "",
   lastChatRenderKey: "",
   chatComposing: false,
@@ -564,6 +565,9 @@ function sendInput() {
   if (state.touch.active) {
     state.pendingDirection.x = state.touch.dx;
     state.pendingDirection.y = state.touch.dy;
+  } else if (state.isTouchDevice) {
+    state.pendingDirection.x = 0;
+    state.pendingDirection.y = 0;
   } else {
     const dx = state.mouse.x - centerX;
     const dy = state.mouse.y - centerY;
@@ -633,6 +637,9 @@ function loop(timestamp) {
     if (state.messageTimer <= 0) {
       messageBox.classList.add("hidden");
     }
+  }
+  if (pruneChatToasts(timestamp)) {
+    renderChatToasts();
   }
 
   requestAnimationFrame(loop);
@@ -1574,13 +1581,10 @@ function renderLeaderboard() {
 }
 
 function renderChat() {
-  const now = performance.now();
-  const previewActive = state.chatCollapsed && state.chatPreviewUntil > now;
   const idleSeconds = (performance.now() - state.chatLastActivityAt) / 1000;
-  chatPanel.classList.toggle("preview", previewActive);
   chatPanel.classList.toggle("faded", !state.chatCollapsed && state.chats.length > 0 && idleSeconds > 4);
-  const items = state.chats.slice(previewActive ? -3 : -12);
-  const renderKey = `${previewActive ? "p" : "f"}|${state.chatCollapsed ? "c" : "o"}|${items.map((entry) => entry.id).join("|")}`;
+  const items = state.chats.slice(-12);
+  const renderKey = `${state.chatCollapsed ? "c" : "o"}|${items.map((entry) => entry.id).join("|")}`;
   if (state.lastChatRenderKey === renderKey) {
     return;
   }
@@ -1606,35 +1610,75 @@ function markChatActivity() {
 function setChatCollapsed(collapsed) {
   state.chatCollapsed = collapsed;
   if (!collapsed) {
-    state.chatPreviewUntil = 0;
     markChatActivity();
   }
   chatPanel.classList.toggle("collapsed", collapsed);
-  chatPanel.classList.toggle("preview", false);
   chatToggle.textContent = collapsed ? "채팅 열기" : "채팅 접기";
   chatToggle.setAttribute("aria-expanded", String(!collapsed));
 }
 
 function handleIncomingChats(nextChats) {
-  let hasNewChat = nextChats.length !== state.chats.length;
-  if (!hasNewChat && nextChats.length > 0) {
-    const prevLast = state.chats[state.chats.length - 1];
-    const nextLast = nextChats[nextChats.length - 1];
-    hasNewChat = !prevLast || !nextLast || prevLast.id !== nextLast.id;
-  }
-  if (!hasNewChat) {
+  const previousIds = new Set(state.chats.map((entry) => entry.id));
+  const newEntries = nextChats.filter((entry) => !previousIds.has(entry.id));
+  if (newEntries.length === 0) {
     return;
   }
 
   markChatActivity();
-  const nextLast = nextChats[nextChats.length - 1];
-  if (state.chatCollapsed && nextLast && !isOwnChatEntry(nextLast)) {
-    state.chatPreviewUntil = performance.now() + 4200;
+  if (state.chatCollapsed) {
+    for (const entry of newEntries) {
+      if (!isOwnChatEntry(entry)) {
+        pushChatToast(entry);
+      }
+    }
   }
 }
 
 function isOwnChatEntry(entry) {
   return !!entry && entry.nickname === state.nickname && !entry.isBot;
+}
+
+function pushChatToast(entry) {
+  if (!chatToast || !entry) {
+    return;
+  }
+  const now = performance.now();
+  state.chatToasts = state.chatToasts
+    .filter((toast) => toast.id !== entry.id && toast.expiresAt > now)
+    .concat({
+      id: entry.id,
+      text: `${entry.nickname}: ${entry.message}`,
+      expiresAt: now + 5000,
+    })
+    .slice(-3);
+  renderChatToasts();
+}
+
+function pruneChatToasts(now = performance.now()) {
+  if (state.chatToasts.length === 0) {
+    return false;
+  }
+  const nextToasts = state.chatToasts.filter((toast) => toast.expiresAt > now);
+  if (nextToasts.length === state.chatToasts.length) {
+    return false;
+  }
+  state.chatToasts = nextToasts;
+  return true;
+}
+
+function renderChatToasts() {
+  if (!chatToast) {
+    return;
+  }
+  if (state.chatToasts.length === 0) {
+    chatToast.innerHTML = "";
+    chatToast.classList.add("hidden");
+    return;
+  }
+  chatToast.classList.remove("hidden");
+  chatToast.innerHTML = state.chatToasts
+    .map((toast) => `<div class="chat-toast-line">${escapeHtml(toast.text)}</div>`)
+    .join("");
 }
 
 function showMessage(text) {
@@ -1647,7 +1691,7 @@ function maybeShowFullscreenPrompt() {
   if (!state.isTouchDevice || !fullscreenPrompt) {
     return;
   }
-  if (isFullscreenActive()) {
+  if (isFullscreenActive() || isNativeAppShell()) {
     return;
   }
   fullscreenPrompt.classList.remove("hidden");
@@ -1784,6 +1828,9 @@ function renderControlHints() {
 }
 
 function isFullscreenActive() {
+  if (isNativeAppShell()) {
+    return true;
+  }
   return !!(
     document.fullscreenElement ||
     document.webkitFullscreenElement ||
@@ -1791,7 +1838,14 @@ function isFullscreenActive() {
   );
 }
 
+function isNativeAppShell() {
+  return window.__CELLGAME_NATIVE_APP__ === true || navigator.userAgent.includes("CellGameAndroidWebView");
+}
+
 async function requestMobileFullscreen() {
+  if (isNativeAppShell()) {
+    return true;
+  }
   const target = document.documentElement;
   try {
     if (target.requestFullscreen) {
@@ -1813,6 +1867,9 @@ async function requestMobileFullscreen() {
 }
 
 async function lockLandscapeOrientation() {
+  if (isNativeAppShell()) {
+    return true;
+  }
   try {
     if (screen.orientation?.lock) {
       await screen.orientation.lock("landscape");
@@ -1826,6 +1883,10 @@ async function lockLandscapeOrientation() {
 
 function updateRotatePrompt() {
   if (!rotatePrompt || !state.isTouchDevice) {
+    return;
+  }
+  if (isNativeAppShell()) {
+    rotatePrompt.classList.add("hidden");
     return;
   }
   const orientationType = screen.orientation?.type || "";

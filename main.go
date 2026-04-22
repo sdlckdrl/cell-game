@@ -508,7 +508,7 @@ func (s *gameState) updateWorld() {
 		}
 
 		if !p.RespawnAt.IsZero() && !isRespawningAt(now, p) {
-			respawnPlayer(p, worldSize)
+			s.respawnPlayerLocked(p)
 			p.LastSeen = now
 			if p.IsBot {
 				p.NextBotThinkAt = now
@@ -641,7 +641,7 @@ func (s *gameState) resetWorldLocked(now time.Time) {
 		}
 		keep.Coins = 0
 		keep.Upgrades = upgradeState{}
-		respawnPlayer(keep, s.worldSize())
+		s.respawnPlayerLocked(keep)
 		keep.LastSeen = now
 		if keep.IsBot {
 			keep.NextBotThinkAt = now

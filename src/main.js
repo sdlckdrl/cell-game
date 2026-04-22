@@ -228,6 +228,7 @@ function isTypingInField() {
 if (state.isTouchDevice) {
   document.body.classList.add("touch-device");
   state.leaderboardCollapsed = true;
+  state.minimapCollapsed = true;
   maybeShowFullscreenPrompt();
   updateRotatePrompt();
 }
@@ -361,18 +362,8 @@ fullscreenAccept.addEventListener("click", async () => {
 fullscreenDismiss.addEventListener("click", () => {
   hideFullscreenPrompt();
 });
-minimapToggle.addEventListener("click", () => {
-  state.minimapCollapsed = !state.minimapCollapsed;
-  minimap.classList.toggle("collapsed", state.minimapCollapsed);
-  minimapToggle.textContent = state.minimapCollapsed ? "지도 열기" : "지도 접기";
-  minimapToggle.setAttribute("aria-expanded", String(!state.minimapCollapsed));
-});
-leaderboardToggle.addEventListener("click", () => {
-  state.leaderboardCollapsed = !state.leaderboardCollapsed;
-  leaderboard.classList.toggle("collapsed", state.leaderboardCollapsed);
-  leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
-  leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
-});
+bindTouchPanelToggle(minimapToggle, toggleMinimapPanel);
+bindTouchPanelToggle(leaderboardToggle, toggleLeaderboardPanel);
 upgradeBuy.addEventListener("click", () => {
   sendUpgradePurchase();
 });
@@ -380,9 +371,7 @@ upgradeToggle.addEventListener("click", () => {
   state.upgradePanelOpen = !state.upgradePanelOpen;
   syncUpgradePanelState();
 });
-chatToggle.addEventListener("click", () => {
-  setChatCollapsed(!state.chatCollapsed);
-});
+bindTouchPanelToggle(chatToggle, toggleChatPanel);
 
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -750,6 +739,8 @@ function updateCamera() {
 
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#08101d";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.save();
   ctx.translate(canvas.width / 2, canvas.height / 2);
   ctx.scale(state.zoom, state.zoom);
@@ -2189,9 +2180,56 @@ function getOwnedMetricsFromRenderPlayers() {
   };
 }
 
-leaderboard.classList.toggle("collapsed", state.leaderboardCollapsed);
-leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
-leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
+function toggleLeaderboardPanel() {
+  state.leaderboardCollapsed = !state.leaderboardCollapsed;
+  syncLeaderboardState();
+}
+
+function toggleMinimapPanel() {
+  state.minimapCollapsed = !state.minimapCollapsed;
+  syncMinimapState();
+}
+
+function toggleChatPanel() {
+  setChatCollapsed(!state.chatCollapsed);
+}
+
+function bindTouchPanelToggle(button, toggle) {
+  let lastTouchToggleAt = 0;
+  button.addEventListener("pointerup", (event) => {
+    if (!state.isTouchDevice || event.pointerType === "mouse") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    lastTouchToggleAt = performance.now();
+    toggle();
+  });
+  button.addEventListener("click", (event) => {
+    if (state.isTouchDevice && performance.now() - lastTouchToggleAt < 450) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    toggle();
+  });
+}
+
+function syncLeaderboardState() {
+  leaderboard.classList.toggle("collapsed", state.leaderboardCollapsed);
+  leaderboardToggle.textContent = state.leaderboardCollapsed ? "순위 열기" : "순위 접기";
+  leaderboardToggle.setAttribute("aria-expanded", String(!state.leaderboardCollapsed));
+}
+
+syncLeaderboardState();
+
+function syncMinimapState() {
+  minimap.classList.toggle("collapsed", state.minimapCollapsed);
+  minimapToggle.textContent = state.minimapCollapsed ? "지도 열기" : "지도 접기";
+  minimapToggle.setAttribute("aria-expanded", String(!state.minimapCollapsed));
+}
+
+syncMinimapState();
 
 function getOwnedCenterFromPlayers() {
   const ownerId = getMyOwnerId();

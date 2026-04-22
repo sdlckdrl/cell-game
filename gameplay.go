@@ -286,16 +286,76 @@ func createWormhole(worldSize float64, kind, pairID string) *wormhole {
 	}
 }
 
-func respawnPlayer(p *player, worldSize float64) {
+func (s *gameState) findSafeSpawnLocked(radius float64) (float64, float64) {
+	worldSize := s.worldSize()
+	const (
+		spawnPadding       = 400.0
+		spawnAttempts      = 30
+		minPlayerClearance = 110.0
+		largeThreatGap     = 220.0
+	)
+
+	now := time.Now()
+	bestX := spawnCoordinate(worldSize, spawnPadding)
+	bestY := spawnCoordinate(worldSize, spawnPadding)
+	bestScore := -math.MaxFloat64
+
+	for attempt := 0; attempt < spawnAttempts; attempt++ {
+		x := spawnCoordinate(worldSize, spawnPadding)
+		y := spawnCoordinate(worldSize, spawnPadding)
+		minClearance := math.MaxFloat64
+		safe := true
+
+		for _, other := range s.players {
+			if other == nil || other.Mass <= 0 || other.Radius <= 0 || isRespawningAt(now, other) {
+				continue
+			}
+
+			otherRadius := currentRadius(other)
+			clearance := distance(x, y, other.X, other.Y) - otherRadius - radius
+			if clearance < minClearance {
+				minClearance = clearance
+			}
+
+			if clearance < minPlayerClearance {
+				safe = false
+				break
+			}
+
+			if effectiveCombatMass(other) > playerStartMass*1.15 && clearance < math.Max(largeThreatGap, otherRadius*1.55) {
+				safe = false
+				break
+			}
+		}
+
+		if minClearance == math.MaxFloat64 {
+			return x, y
+		}
+		if safe {
+			return x, y
+		}
+		if minClearance > bestScore {
+			bestScore = minClearance
+			bestX = x
+			bestY = y
+		}
+	}
+
+	return bestX, bestY
+}
+
+func (s *gameState) respawnPlayerLocked(p *player) {
 	ownerID := p.OwnerID
 	if ownerID == "" {
 		ownerID = p.ID
 	}
+	startRadius := massToRadius(playerStartMass)
+	spawnX, spawnY := s.findSafeSpawnLocked(startRadius)
 	p.Energy = 4000
 	p.Mass = playerStartMass
-	p.Radius = massToRadius(playerStartMass)
-	p.X = spawnCoordinate(worldSize, 400)
-	p.Y = spawnCoordinate(worldSize, 400)
+	p.Radius = startRadius
+	p.X = spawnX
+	p.Y = spawnY
 	p.Scale = 1
 	p.OwnerID = ownerID
 	p.Direction = direction{}

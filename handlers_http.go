@@ -30,8 +30,10 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 	cellType := sanitizeCellType(req.CellType)
 	playerID := randomID()
 	sessionID := randomID()
-	worldSize := s.worldSize()
+	startRadius := massToRadius(playerStartMass)
 
+	s.mu.Lock()
+	spawnX, spawnY := s.findSafeSpawnLocked(startRadius)
 	p := &player{
 		ID:        playerID,
 		SessionID: sessionID,
@@ -39,16 +41,15 @@ func (s *gameState) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Nickname:  nickname,
 		CellType:  cellType,
 		Ability:   abilityLabel(cellType),
-		X:         spawnCoordinate(worldSize, 400),
-		Y:         spawnCoordinate(worldSize, 400),
+		X:         spawnX,
+		Y:         spawnY,
 		Mass:      playerStartMass,
-		Radius:    massToRadius(playerStartMass),
+		Radius:    startRadius,
 		Scale:     1,
 		Color:     randomColor(),
 		LastSeen:  time.Now(),
 	}
 	p.Energy = 4000
-	s.mu.Lock()
 	s.players[playerID] = p
 	s.reconcileBotsLocked()
 	s.mu.Unlock()

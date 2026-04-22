@@ -731,6 +731,8 @@ body.touch-device .reset-notice {
   color: var(--text);
   font-size: 0.8rem;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .leaderboard.collapsed {

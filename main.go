@@ -71,12 +71,13 @@ const (
 	spatialGridCols = (int(maxWorldSize) / int(spatialCellSize)) + 1
 	spatialGridRows = spatialGridCols
 
-	coordQuantScale     = 8.0
-	radiusQuantScale    = 8.0
-	valueQuantScale     = 16.0
-	scaleQuantScale     = 1024.0
-	massQuantScale      = 16.0
-	durationQuantStepMs = 100
+	coordQuantScale       = 8.0
+	radiusQuantScale      = 8.0
+	valueQuantScale       = 16.0
+	scaleQuantScale       = 1024.0
+	massQuantScale        = 16.0
+	durationQuantStepMs   = 100
+	maxClientFramePayload = 4 * 1024
 )
 
 var mimeTypes = map[string]string{
@@ -492,7 +493,14 @@ func main() {
 	http.HandleFunc("/", serveStatic)
 
 	log.Printf("Go cell server running at http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(server.ListenAndServe())
 }
 
 func (s *gameState) runWorld() {

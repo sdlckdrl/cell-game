@@ -139,58 +139,67 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	nextConfig := s.config
 	if req.MinimumPlayers != nil {
-		s.config.MinimumPlayers = int(math.Max(0, float64(*req.MinimumPlayers)))
+		nextConfig.MinimumPlayers = int(math.Max(0, float64(*req.MinimumPlayers)))
 	}
 	if req.ProbioticCount != nil {
-		s.config.ProbioticCount = int(math.Max(0, float64(*req.ProbioticCount)))
+		nextConfig.ProbioticCount = int(math.Max(0, float64(*req.ProbioticCount)))
 	}
 	if req.CactusCount != nil {
-		s.config.CactusCount = int(math.Max(0, float64(*req.CactusCount)))
+		nextConfig.CactusCount = int(math.Max(0, float64(*req.CactusCount)))
 	}
 	if req.WormholePairs != nil {
-		s.config.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
+		nextConfig.WormholePairs = int(math.Max(0, float64(*req.WormholePairs)))
 	}
 	if req.CactusRelocateSeconds != nil {
-		s.config.CactusRelocateSeconds = int(math.Max(0, float64(*req.CactusRelocateSeconds)))
+		nextConfig.CactusRelocateSeconds = int(math.Max(0, float64(*req.CactusRelocateSeconds)))
 	}
 	if req.WormholeRelocateSeconds != nil {
-		s.config.WormholeRelocateSeconds = int(math.Max(0, float64(*req.WormholeRelocateSeconds)))
+		nextConfig.WormholeRelocateSeconds = int(math.Max(0, float64(*req.WormholeRelocateSeconds)))
 	}
 	if req.LeechCount != nil {
-		s.config.LeechCount = int(math.Max(0, float64(*req.LeechCount)))
+		nextConfig.LeechCount = int(math.Max(0, float64(*req.LeechCount)))
 	}
 	if req.LeechAttachSeconds != nil {
-		s.config.LeechAttachSeconds = *req.LeechAttachSeconds
+		nextConfig.LeechAttachSeconds = *req.LeechAttachSeconds
 	}
 	if req.LeechDrainPercent != nil {
-		s.config.LeechDrainPercent = *req.LeechDrainPercent
+		nextConfig.LeechDrainPercent = *req.LeechDrainPercent
 	}
 	if req.LeechFedCooldownSeconds != nil {
-		s.config.LeechFedCooldownSeconds = *req.LeechFedCooldownSeconds
+		nextConfig.LeechFedCooldownSeconds = *req.LeechFedCooldownSeconds
 	}
 	if req.LeechMaxMass != nil {
-		s.config.LeechMaxMass = *req.LeechMaxMass
+		nextConfig.LeechMaxMass = *req.LeechMaxMass
 	}
 	if req.LeechSwimSpeed != nil {
-		s.config.LeechSwimSpeed = *req.LeechSwimSpeed
+		nextConfig.LeechSwimSpeed = *req.LeechSwimSpeed
 	}
 	if req.LeechMaxSizeScale != nil {
-		s.config.LeechMaxSizeScale = *req.LeechMaxSizeScale
+		nextConfig.LeechMaxSizeScale = *req.LeechMaxSizeScale
 	}
 	if req.WorldSize != nil {
-		s.config.WorldSize = sanitizeWorldSize(*req.WorldSize)
+		nextConfig.WorldSize = sanitizeWorldSize(*req.WorldSize)
 	}
 	if req.BaseSpeed != nil {
-		s.config.BaseSpeed = math.Max(50, *req.BaseSpeed)
+		nextConfig.BaseSpeed = math.Max(50, *req.BaseSpeed)
 	}
 	if req.SpeedDivisor != nil {
-		s.config.SpeedDivisor = math.Max(1, *req.SpeedDivisor)
+		nextConfig.SpeedDivisor = math.Max(1, *req.SpeedDivisor)
 	}
 	if req.MinimumSpeed != nil {
-		s.config.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
+		nextConfig.MinimumSpeed = math.Max(10, *req.MinimumSpeed)
 	}
-	s.config = normalizeRuntimeConfig(s.config)
+
+	nextConfig = normalizeRuntimeConfig(nextConfig)
+	if err := saveRuntimeConfig(nextConfig); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "failed to persist config", http.StatusInternalServerError)
+		return
+	}
+
+	s.config = nextConfig
 	s.clampWorldObjectsLocked()
 	s.reconcileProbioticsLocked()
 	s.reconcileCactiLocked()
@@ -203,31 +212,24 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	config := s.config
 	s.mu.Unlock()
 
-	if err := saveRuntimeConfig(config); err != nil {
-		http.Error(w, "failed to persist config", http.StatusInternalServerError)
-		return
-	}
-
 	writeJSON(w, http.StatusOK, config)
 }
 
 func serveStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	root, err := appBaseDir()
 	if err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
 
-	requestPath := r.URL.Path
-	if requestPath == "/" {
-		requestPath = "/index.html"
-	}
-
-	relativePath := strings.TrimPrefix(requestPath, "/")
-	cleanPath := filepath.Clean(relativePath)
-	fullPath := filepath.Join(root, cleanPath)
-	if !strings.HasPrefix(fullPath, root) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	fullPath, ok := resolvePublicStaticPath(root, r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -242,6 +244,55 @@ func serveStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 	}
 	_, _ = w.Write(data)
+}
+
+func resolvePublicStaticPath(root, requestPath string) (string, bool) {
+	if requestPath == "" || requestPath == "/" {
+		requestPath = "/index.html"
+	}
+
+	relativePath := strings.TrimPrefix(requestPath, "/")
+	cleanPath := filepath.Clean(filepath.FromSlash(relativePath))
+	if cleanPath == "." || cleanPath == "" {
+		cleanPath = "index.html"
+	}
+	if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+
+	cleanSlashPath := filepath.ToSlash(cleanPath)
+	if !isPublicStaticPath(cleanSlashPath) {
+		return "", false
+	}
+
+	fullPath := filepath.Join(root, cleanPath)
+	relativeToRoot, err := filepath.Rel(root, fullPath)
+	if err != nil {
+		return "", false
+	}
+	if relativeToRoot == ".." || strings.HasPrefix(relativeToRoot, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+
+	return fullPath, true
+}
+
+func isPublicStaticPath(path string) bool {
+	switch path {
+	case "index.html", "privacy.html", "styles.css":
+		return true
+	}
+
+	if !strings.HasPrefix(path, "src/") {
+		return false
+	}
+
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".ico":
+		return true
+	default:
+		return false
+	}
 }
 
 func serveSuperPage(w http.ResponseWriter, r *http.Request) {

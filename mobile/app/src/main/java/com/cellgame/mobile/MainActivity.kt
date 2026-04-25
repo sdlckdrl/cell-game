@@ -145,7 +145,15 @@ class MainActivity : AppCompatActivity() {
             useWideViewPort = true
             loadWithOverviewMode = true
             mediaPlaybackRequiresUserGesture = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            allowFileAccess = false
+            allowContentAccess = false
+            javaScriptCanOpenWindowsAutomatically = false
+            mixedContentMode =
+                if (BuildConfig.DEBUG) {
+                    WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                } else {
+                    WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                }
             cacheMode = WebSettings.LOAD_DEFAULT
             if (!userAgentString.contains(APP_USER_AGENT_SUFFIX)) {
                 userAgentString += APP_USER_AGENT_SUFFIX
@@ -154,7 +162,7 @@ class MainActivity : AppCompatActivity() {
 
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
+        cookieManager.setAcceptThirdPartyCookies(webView, false)
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {

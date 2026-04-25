@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.GradleException
 
 plugins {
     id("com.android.application")
@@ -29,11 +30,23 @@ val releaseStoreFile = keystoreProps.getProperty("storeFile")?.trim().orEmpty()
 val releaseStorePassword = keystoreProps.getProperty("storePassword")?.trim().orEmpty()
 val releaseKeyAlias = keystoreProps.getProperty("keyAlias")?.trim().orEmpty()
 val releaseKeyPassword = keystoreProps.getProperty("keyPassword")?.trim().orEmpty()
+val releaseStore = if (releaseStoreFile.isNotBlank()) rootProject.file(releaseStoreFile) else null
 val hasReleaseSigning =
-    releaseStoreFile.isNotBlank() &&
+    releaseStore?.isFile == true &&
         releaseStorePassword.isNotBlank() &&
         releaseKeyAlias.isNotBlank() &&
         releaseKeyPassword.isNotBlank()
+
+val requestedTasks = gradle.startParameter.taskNames.map { it.lowercase() }
+val requiresReleaseSigning = requestedTasks.any { it.contains("release") }
+
+if (requiresReleaseSigning && !hasReleaseSigning) {
+    throw GradleException(
+        "Release signing is not configured. Copy mobile/keystore.properties.example to mobile/keystore.properties " +
+            "and add your upload keystore file (for example mobile/signing/cellgame-release.jks) before running " +
+            "assembleRelease or bundleRelease.",
+    )
+}
 
 android {
     namespace = "com.cellgame.mobile"
@@ -53,7 +66,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = rootProject.file(releaseStoreFile)
+                storeFile = releaseStore
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
@@ -65,6 +78,7 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             buildConfigField("String", "GAME_BASE_URL", quotedConfig("debugBaseUrl", "http://10.0.2.2:8000"))
         }
 
@@ -73,6 +87,7 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             buildConfigField("String", "GAME_BASE_URL", quotedConfig("releaseBaseUrl", "https://your-domain.example.com"))
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

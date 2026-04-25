@@ -226,7 +226,11 @@ func readClientFrame(conn net.Conn) ([]byte, byte, error) {
 		return nil, 0, err
 	}
 
+	fin := (header[0] & 0x80) != 0
 	opcode := header[0] & 0x0f
+	if !fin {
+		return nil, 0, fmt.Errorf("fragmented frames are unsupported")
+	}
 	masked := (header[1] & 0x80) != 0
 	if !masked {
 		return nil, 0, fmt.Errorf("client frames must be masked")
@@ -246,6 +250,9 @@ func readClientFrame(conn net.Conn) ([]byte, byte, error) {
 			return nil, 0, err
 		}
 		payloadLen = binary.BigEndian.Uint64(ext)
+	}
+	if payloadLen > maxClientFramePayload {
+		return nil, 0, fmt.Errorf("websocket payload too large: %d", payloadLen)
 	}
 
 	mask := make([]byte, 4)

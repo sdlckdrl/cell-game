@@ -273,6 +273,43 @@ func createCactus(worldSize float64) *cactus {
 	}
 }
 
+func createLeechVirus(worldSize float64) *leechVirus {
+	mass := leechInitialMass + mathrand.Float64()*8
+	size := 17 + mathrand.Float64()*4
+	return &leechVirus{
+		ID:          randomID(),
+		X:           spawnCoordinate(worldSize, 160),
+		Y:           spawnCoordinate(worldSize, 160),
+		Size:        size,
+		Mass:        mass,
+		BaseMass:    mass,
+		BaseSize:    size,
+		Angle:       mathrand.Float64() * math.Pi * 2,
+		SwimAngle:   mathrand.Float64() * math.Pi * 2,
+		WigglePhase: mathrand.Float64() * math.Pi * 2,
+	}
+}
+
+func updateLeechSize(leech *leechVirus, maxSizeScale float64, maxMass float64) {
+	if leech.BaseMass <= 0 {
+		leech.BaseMass = math.Max(leechInitialMass, leech.Mass)
+	}
+	if leech.BaseSize <= 0 {
+		leech.BaseSize = math.Max(16, leech.Size)
+	}
+	growthCeiling := math.Max(leech.BaseMass+1, maxMass)
+	growth := clamp((leech.Mass-leech.BaseMass)/math.Max(1, growthCeiling-leech.BaseMass), 0, 1)
+	leech.Size = leech.BaseSize * (1 + growth*(maxSizeScale-1))
+}
+
+func cloneLeechVirus(item *leechVirus, now time.Time) *leechVirus {
+	copyLeech := *item
+	copyLeech.Angle = normalizeAngle(copyLeech.Angle)
+	copyLeech.AttachedRemaining = int64(maxDuration(0, item.AttachedUntil.Sub(now)) / time.Millisecond)
+	copyLeech.BurstRemaining = int64(maxDuration(0, item.BurstUntil.Sub(now)) / time.Millisecond)
+	return &copyLeech
+}
+
 func createWormhole(worldSize float64, kind, pairID string) *wormhole {
 	radius := 34 + mathrand.Float64()*10
 	return &wormhole{
@@ -1265,6 +1302,181 @@ func (s *gameState) resolveCactusHitLocked(p *player, now time.Time) {
 		}
 		return
 	}
+}
+
+func (s *gameState) updateLeechVirusesLocked(now time.Time) {
+	worldSize := s.worldSize()
+	maxMass := s.config.LeechMaxMass
+	attachedTargets := make(map[string]bool, len(s.leeches))
+	for _, leech := range s.leeches {
+		if leech != nil && leech.AttachedTo != "" {
+			attachedTargets[leech.AttachedTo] = true
+		}
+	}
+
+	for index, leech := range s.leeches {
+		if leech == nil {
+			continue
+		}
+		if !leech.BurstUntil.IsZero() {
+			if now.Before(leech.BurstUntil) {
+				continue
+			}
+			s.leeches[index] = createLeechVirus(worldSize)
+			continue
+		}
+		updateLeechSize(leech, s.config.LeechMaxSizeScale, maxMass)
+		if leech.Mass >= maxMass-0.01 {
+			burstLeech(leech, now, s.config.LeechMaxSizeScale)
+			continue
+		}
+
+		if leech.AttachedTo != "" {
+			s.updateAttachedLeechLocked(leech, now, worldSize)
+			continue
+		}
+
+		leech.WigglePhase += 0.1 + mathrand.Float64()*0.015
+		leech.SwimAngle = normalizeAngle(leech.SwimAngle + math.Sin(leech.WigglePhase)*0.035 + (mathrand.Float64()-0.5)*0.045)
+		leech.Angle = leech.SwimAngle
+		speed := s.config.LeechSwimSpeed * (0.72 + math.Sin(leech.WigglePhase*0.7)*0.18)
+		leech.X += math.Cos(leech.SwimAngle) * speed / tickRate
+		leech.Y += math.Sin(leech.SwimAngle) * speed / tickRate
+
+		if leech.X < leech.Size || leech.X > worldSize-leech.Size {
+			leech.SwimAngle = normalizeAngle(math.Pi - leech.SwimAngle)
+		}
+		if leech.Y < leech.Size || leech.Y > worldSize-leech.Size {
+			leech.SwimAngle = normalizeAngle(-leech.SwimAngle)
+		}
+		leech.X = clamp(leech.X, leech.Size, worldSize-leech.Size)
+		leech.Y = clamp(leech.Y, leech.Size, worldSize-leech.Size)
+
+		if now.Before(leech.NextAttachAt) {
+			continue
+		}
+		target := s.findLeechAttachTargetLocked(leech, now, attachedTargets)
+		if target != nil {
+			s.attachLeechLocked(leech, target, now)
+			attachedTargets[target.ID] = true
+		}
+	}
+}
+
+func (s *gameState) updateAttachedLeechLocked(leech *leechVirus, now time.Time, worldSize float64) {
+	target, ok := s.players[leech.AttachedTo]
+	if !ok || target == nil || isRespawningAt(now, target) || target.Mass <= 0 || target.Radius <= 0 {
+		detachLeech(leech, now, leechAttachCooldown)
+		return
+	}
+
+	attachDuration := time.Duration(s.config.LeechAttachSeconds) * time.Second
+	maxMass := s.config.LeechMaxMass
+	targetRadius := currentRadius(target)
+	leech.AttachDistance = math.Max(leech.AttachDistance, targetRadius*0.62)
+	leech.X = clamp(target.X+math.Cos(leech.AttachOffset)*leech.AttachDistance, leech.Size, worldSize-leech.Size)
+	leech.Y = clamp(target.Y+math.Sin(leech.AttachOffset)*leech.AttachDistance, leech.Size, worldSize-leech.Size)
+	leech.Angle = normalizeAngle(leech.AttachOffset + math.Pi/2)
+
+	if leech.LastDrainAt.IsZero() {
+		leech.LastDrainAt = now
+	}
+	elapsed := now.Sub(leech.LastDrainAt)
+	if elapsed > 0 && leech.DrainedMass < leech.DrainTotal {
+		drain := leech.DrainTotal * elapsed.Seconds() / attachDuration.Seconds()
+		drain = math.Min(drain, leech.DrainTotal-leech.DrainedMass)
+		drain = math.Min(drain, math.Max(0, target.Mass-playerStartMass*0.35))
+		if drain > 0 {
+			target.Mass -= drain
+			target.Radius = massToRadius(target.Mass)
+			leech.Mass = math.Min(maxMass, leech.Mass+drain)
+			updateLeechSize(leech, s.config.LeechMaxSizeScale, maxMass)
+			leech.DrainedMass += drain
+		}
+		leech.LastDrainAt = now
+	}
+
+	if leech.Mass >= maxMass-0.01 {
+		burstLeech(leech, now, s.config.LeechMaxSizeScale)
+		return
+	}
+	if !now.Before(leech.AttachedUntil) || leech.DrainedMass >= leech.DrainTotal-0.01 {
+		detachLeech(leech, now, time.Duration(s.config.LeechFedCooldownSeconds)*time.Second)
+	}
+}
+
+func (s *gameState) findLeechAttachTargetLocked(leech *leechVirus, now time.Time, attachedTargets map[string]bool) *player {
+	var best *player
+	bestOverlap := 0.0
+	for _, p := range s.players {
+		if p == nil || p.Mass <= playerStartMass*0.45 || p.Radius <= 0 || isRespawningAt(now, p) {
+			continue
+		}
+		if attachedTargets[p.ID] || now.Before(p.ShieldUntil) {
+			continue
+		}
+		playerRadius := currentRadius(p)
+		dist := distance(leech.X, leech.Y, p.X, p.Y)
+		overlap := playerRadius + leech.Size*0.8 - dist
+		if overlap > bestOverlap {
+			bestOverlap = overlap
+			best = p
+		}
+	}
+	return best
+}
+
+func (s *gameState) attachLeechLocked(leech *leechVirus, target *player, now time.Time) {
+	angle := math.Atan2(leech.Y-target.Y, leech.X-target.X)
+	if angle == 0 {
+		angle = mathrand.Float64() * math.Pi * 2
+	}
+	targetRadius := currentRadius(target)
+	leech.AttachedTo = target.ID
+	leech.AttachOffset = angle
+	leech.AttachDistance = math.Max(targetRadius*0.68, targetRadius-leech.Size*0.12)
+	leech.AttachedUntil = now.Add(time.Duration(s.config.LeechAttachSeconds) * time.Second)
+	leech.DrainTotal = math.Max(0, target.Mass*s.config.LeechDrainPercent/100)
+	leech.DrainedMass = 0
+	leech.LastDrainAt = now
+	leech.X = target.X + math.Cos(angle)*leech.AttachDistance
+	leech.Y = target.Y + math.Sin(angle)*leech.AttachDistance
+	leech.Angle = normalizeAngle(angle + math.Pi/2)
+}
+
+func detachLeech(leech *leechVirus, now time.Time, cooldown time.Duration) {
+	leech.AttachedTo = ""
+	leech.AttachOffset = 0
+	leech.AttachDistance = 0
+	leech.AttachedUntil = time.Time{}
+	leech.DrainTotal = 0
+	leech.DrainedMass = 0
+	leech.LastDrainAt = time.Time{}
+	leech.NextAttachAt = now.Add(cooldown)
+	leech.SwimAngle = normalizeAngle(leech.Angle - math.Pi/2 + (mathrand.Float64()-0.5)*0.8)
+}
+
+func burstLeech(leech *leechVirus, now time.Time, maxSizeScale float64) {
+	leech.AttachedTo = ""
+	leech.AttachOffset = 0
+	leech.AttachDistance = 0
+	leech.AttachedUntil = time.Time{}
+	leech.DrainTotal = 0
+	leech.DrainedMass = 0
+	leech.LastDrainAt = time.Time{}
+	leech.NextAttachAt = time.Time{}
+	leech.BurstUntil = now.Add(leechBurstDuration)
+	leech.Size = leech.BaseSize * maxSizeScale
+}
+
+func normalizeAngle(angle float64) float64 {
+	for angle < 0 {
+		angle += math.Pi * 2
+	}
+	for angle >= math.Pi*2 {
+		angle -= math.Pi * 2
+	}
+	return angle
 }
 
 func (s *gameState) forceSplitFromCactusLocked(p *player, dir direction, now time.Time) {

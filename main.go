@@ -23,6 +23,7 @@ const (
 	minWorldSize             = 1600.0
 	foodTarget               = 320
 	cactusTarget             = 28
+	leechTarget              = 12
 	defaultWormholePairs     = 3
 	playerStartMass          = 36.0
 	tickRate                 = 30
@@ -55,17 +56,26 @@ const (
 	dividerMaxFragments      = 16
 	cactusTriggerRatio       = 0.38
 	cactusFragmentMassMin    = 24.0
+	leechAttachDuration      = 30 * time.Second
+	leechDrainFraction       = 0.30
+	leechSwimSpeed           = 38.0
+	leechInitialMass         = 18.0
+	leechMaxMass             = 120.0
+	leechAttachCooldown      = 1500 * time.Millisecond
+	leechFedCooldown         = 10 * time.Second
+	leechBurstDuration       = 1200 * time.Millisecond
+	leechMaxSizeScale        = 1.10
 
 	// 공간 분할(Spatial Partitioning) 관련 상수
 	spatialCellSize = 500.0
 	spatialGridCols = (int(maxWorldSize) / int(spatialCellSize)) + 1
 	spatialGridRows = spatialGridCols
 
-	coordQuantScale = 8.0
-	radiusQuantScale = 8.0
-	valueQuantScale = 16.0
-	scaleQuantScale = 1024.0
-	massQuantScale = 16.0
+	coordQuantScale     = 8.0
+	radiusQuantScale    = 8.0
+	valueQuantScale     = 16.0
+	scaleQuantScale     = 1024.0
+	massQuantScale      = 16.0
 	durationQuantStepMs = 100
 )
 
@@ -101,6 +111,7 @@ type gameState struct {
 	players                map[string]*player
 	foods                  []*food
 	cacti                  []*cactus
+	leeches                []*leechVirus
 	wormholes              []*wormhole
 	chats                  []chatEntry
 	config                 runtimeConfig
@@ -122,6 +133,13 @@ type runtimeConfig struct {
 	WormholePairs           int     `json:"wormholePairs"`
 	CactusRelocateSeconds   int     `json:"cactusRelocateSeconds"`
 	WormholeRelocateSeconds int     `json:"wormholeRelocateSeconds"`
+	LeechCount              int     `json:"leechCount"`
+	LeechAttachSeconds      int     `json:"leechAttachSeconds"`
+	LeechDrainPercent       float64 `json:"leechDrainPercent"`
+	LeechFedCooldownSeconds int     `json:"leechFedCooldownSeconds"`
+	LeechMaxMass            float64 `json:"leechMaxMass"`
+	LeechSwimSpeed          float64 `json:"leechSwimSpeed"`
+	LeechMaxSizeScale       float64 `json:"leechMaxSizeScale"`
 	WorldSize               float64 `json:"worldSize"`
 	BaseSpeed               float64 `json:"baseSpeed"`
 	SpeedDivisor            float64 `json:"speedDivisor"`
@@ -200,6 +218,30 @@ type cactus struct {
 	Height float64 `json:"height"`
 }
 
+type leechVirus struct {
+	ID                string    `json:"id"`
+	X                 float64   `json:"x"`
+	Y                 float64   `json:"y"`
+	Size              float64   `json:"size"`
+	Mass              float64   `json:"mass"`
+	Angle             float64   `json:"angle"`
+	AttachedTo        string    `json:"attachedTo,omitempty"`
+	AttachedRemaining int64     `json:"attachedRemaining,omitempty"`
+	BurstRemaining    int64     `json:"burstRemaining,omitempty"`
+	BaseMass          float64   `json:"-"`
+	BaseSize          float64   `json:"-"`
+	AttachOffset      float64   `json:"-"`
+	AttachDistance    float64   `json:"-"`
+	AttachedUntil     time.Time `json:"-"`
+	BurstUntil        time.Time `json:"-"`
+	DrainTotal        float64   `json:"-"`
+	DrainedMass       float64   `json:"-"`
+	LastDrainAt       time.Time `json:"-"`
+	NextAttachAt      time.Time `json:"-"`
+	SwimAngle         float64   `json:"-"`
+	WigglePhase       float64   `json:"-"`
+}
+
 type wormhole struct {
 	ID        string  `json:"id"`
 	Kind      string  `json:"kind"`
@@ -238,16 +280,18 @@ type inputMessage struct {
 }
 
 type snapshotMessage struct {
-	Type               string      `json:"type"`
-	Full               bool        `json:"full,omitempty"`
-	Players            []*player   `json:"players"`
-	RemovedPlayerIDs   []string    `json:"removedPlayerIds,omitempty"`
-	Foods              []*food     `json:"foods,omitempty"`
-	Cacti              []*cactus   `json:"cacti,omitempty"`
-	Wormholes          []*wormhole `json:"wormholes,omitempty"`
-	RemovedFoodIDs     []string    `json:"removedFoodIds,omitempty"`
-	RemovedCactusIDs   []string    `json:"removedCactusIds,omitempty"`
-	RemovedWormholeIDs []string    `json:"removedWormholeIds,omitempty"`
+	Type               string        `json:"type"`
+	Full               bool          `json:"full,omitempty"`
+	Players            []*player     `json:"players"`
+	RemovedPlayerIDs   []string      `json:"removedPlayerIds,omitempty"`
+	Foods              []*food       `json:"foods,omitempty"`
+	Cacti              []*cactus     `json:"cacti,omitempty"`
+	Leeches            []*leechVirus `json:"leeches,omitempty"`
+	Wormholes          []*wormhole   `json:"wormholes,omitempty"`
+	RemovedFoodIDs     []string      `json:"removedFoodIds,omitempty"`
+	RemovedCactusIDs   []string      `json:"removedCactusIds,omitempty"`
+	RemovedLeechIDs    []string      `json:"removedLeechIds,omitempty"`
+	RemovedWormholeIDs []string      `json:"removedWormholeIds,omitempty"`
 }
 
 type leaderboardMessage struct {
@@ -298,6 +342,13 @@ type adminConfigRequest struct {
 	WormholePairs           *int     `json:"wormholePairs"`
 	CactusRelocateSeconds   *int     `json:"cactusRelocateSeconds"`
 	WormholeRelocateSeconds *int     `json:"wormholeRelocateSeconds"`
+	LeechCount              *int     `json:"leechCount"`
+	LeechAttachSeconds      *int     `json:"leechAttachSeconds"`
+	LeechDrainPercent       *float64 `json:"leechDrainPercent"`
+	LeechFedCooldownSeconds *int     `json:"leechFedCooldownSeconds"`
+	LeechMaxMass            *float64 `json:"leechMaxMass"`
+	LeechSwimSpeed          *float64 `json:"leechSwimSpeed"`
+	LeechMaxSizeScale       *float64 `json:"leechMaxSizeScale"`
 	WorldSize               *float64 `json:"worldSize"`
 	BaseSpeed               *float64 `json:"baseSpeed"`
 	SpeedDivisor            *float64 `json:"speedDivisor"`
@@ -322,6 +373,7 @@ type snapshotDeltaCache struct {
 	players   map[string]uint64
 	foods     map[string]uint64
 	cacti     map[string]uint64
+	leeches   map[string]uint64
 	wormholes map[string]uint64
 }
 
@@ -360,6 +412,7 @@ type spatialGrid struct {
 	players   [][][]*player
 	foods     [][][]*food
 	cacti     [][][]*cactus
+	leeches   [][][]*leechVirus
 	wormholes [][][]*wormhole
 }
 
@@ -368,12 +421,14 @@ func newSpatialGrid() *spatialGrid {
 		players:   make([][][]*player, spatialGridCols),
 		foods:     make([][][]*food, spatialGridCols),
 		cacti:     make([][][]*cactus, spatialGridCols),
+		leeches:   make([][][]*leechVirus, spatialGridCols),
 		wormholes: make([][][]*wormhole, spatialGridCols),
 	}
 	for i := 0; i < spatialGridCols; i++ {
 		g.players[i] = make([][]*player, spatialGridRows)
 		g.foods[i] = make([][]*food, spatialGridRows)
 		g.cacti[i] = make([][]*cactus, spatialGridRows)
+		g.leeches[i] = make([][]*leechVirus, spatialGridRows)
 		g.wormholes[i] = make([][]*wormhole, spatialGridRows)
 	}
 	return g
@@ -411,6 +466,7 @@ func main() {
 		players:                make(map[string]*player),
 		foods:                  make([]*food, 0, foodTarget),
 		cacti:                  make([]*cactus, 0, cactusTarget),
+		leeches:                make([]*leechVirus, 0, leechTarget),
 		wormholes:              make([]*wormhole, 0, defaultWormholePairs*2),
 		chats:                  make([]chatEntry, 0, 20),
 		config:                 config,
@@ -422,6 +478,7 @@ func main() {
 	}
 	state.seedFoods()
 	state.seedCacti()
+	state.seedLeeches()
 	state.reconcileWormholesLocked()
 	state.reconcileBotsLocked()
 	go state.runWorld()
@@ -603,6 +660,7 @@ func (s *gameState) updateWorld() {
 		}
 	}
 
+	s.updateLeechVirusesLocked(now)
 	s.reconcileBotsLocked()
 	s.applyOwnedCohesionLocked(now)
 	s.resolvePlayerEatingV2(now)
@@ -650,9 +708,11 @@ func (s *gameState) resetWorldLocked(now time.Time) {
 
 	s.foods = s.foods[:0]
 	s.cacti = s.cacti[:0]
+	s.leeches = s.leeches[:0]
 	s.wormholes = s.wormholes[:0]
 	s.seedFoods()
 	s.reconcileCactiLocked()
+	s.reconcileLeechesLocked()
 	s.reconcileWormholesLocked()
 	s.lastCactusRelocation = now
 	s.lastWormholeRelocation = now
@@ -670,6 +730,7 @@ func (s *gameState) broadcastSnapshot(includeFoods bool) {
 			grid.players[cx][cy] = grid.players[cx][cy][:0]
 			grid.foods[cx][cy] = grid.foods[cx][cy][:0]
 			grid.cacti[cx][cy] = grid.cacti[cx][cy][:0]
+			grid.leeches[cx][cy] = grid.leeches[cx][cy][:0]
 			grid.wormholes[cx][cy] = grid.wormholes[cx][cy][:0]
 		}
 	}
@@ -687,6 +748,10 @@ func (s *gameState) broadcastSnapshot(includeFoods bool) {
 	for _, c := range s.cacti {
 		cx, cy := getCellIndex(c.X, c.Y)
 		grid.cacti[cx][cy] = append(grid.cacti[cx][cy], c)
+	}
+	for _, leech := range s.leeches {
+		cx, cy := getCellIndex(leech.X, leech.Y)
+		grid.leeches[cx][cy] = append(grid.leeches[cx][cy], leech)
 	}
 	for _, w := range s.wormholes {
 		cx, cy := getCellIndex(w.X, w.Y)
@@ -746,6 +811,7 @@ func (s *gameState) broadcastSnapshot(includeFoods bool) {
 		var players []*player
 		var foods []*food
 		var cacti []*cactus
+		var leeches []*leechVirus
 		var wormholes []*wormhole
 
 		// 4. 전체 순회 대신 인접 격자(Grid)만 순회하여 성능 극대화
@@ -775,6 +841,12 @@ func (s *gameState) broadcastSnapshot(includeFoods bool) {
 					copyCactus := *c
 					cacti = append(cacti, &copyCactus)
 				}
+				for _, leech := range grid.leeches[cx][cy] {
+					if !isWithinCullRange(centerX, centerY, leech.X, leech.Y, objectCullRange+leech.Size*2.4) {
+						continue
+					}
+					leeches = append(leeches, cloneLeechVirus(leech, snapshotNow))
+				}
 				for _, w := range grid.wormholes[cx][cy] {
 					if !isWithinCullRange(centerX, centerY, w.X, w.Y, objectCullRange+w.PullRange) {
 						continue
@@ -789,8 +861,8 @@ func (s *gameState) broadcastSnapshot(includeFoods bool) {
 		}
 
 		targets = append(targets, snapshotTarget{
-			conn: viewer.Conn,
-			message: s.buildDeltaSnapshotMessage(viewer.Conn, players, foods, cacti, wormholes, false, includeFoods),
+			conn:    viewer.Conn,
+			message: s.buildDeltaSnapshotMessage(viewer.Conn, players, foods, cacti, leeches, wormholes, false, includeFoods),
 		})
 	}
 	s.mu.RUnlock() // JSON 생성 후 ReadLock 조기 해제
@@ -1048,6 +1120,14 @@ func (s *gameState) buildSnapshotPayload(playerID string, conn *wsConn) ([]byte,
 		cacti = append(cacti, &copyCactus)
 	}
 
+	leeches := make([]*leechVirus, 0, len(s.leeches))
+	for _, leech := range s.leeches {
+		if !isWithinCullRange(centerX, centerY, leech.X, leech.Y, objectCullRange+leech.Size*2.4) {
+			continue
+		}
+		leeches = append(leeches, cloneLeechVirus(leech, snapshotNow))
+	}
+
 	wormholes := make([]*wormhole, 0, len(s.wormholes))
 	for _, hole := range s.wormholes {
 		if !isWithinCullRange(centerX, centerY, hole.X, hole.Y, objectCullRange+hole.PullRange) {
@@ -1058,7 +1138,7 @@ func (s *gameState) buildSnapshotPayload(playerID string, conn *wsConn) ([]byte,
 	}
 	s.mu.RUnlock()
 
-	message := s.buildDeltaSnapshotMessage(conn, players, foods, cacti, wormholes, true, true)
+	message := s.buildDeltaSnapshotMessage(conn, players, foods, cacti, leeches, wormholes, true, true)
 	tablePayload, err := conn.buildStringTablePayloadForPlayers(message.Players)
 	if err != nil {
 		return nil, snapshotMessage{}, err
@@ -1066,8 +1146,8 @@ func (s *gameState) buildSnapshotPayload(playerID string, conn *wsConn) ([]byte,
 	return tablePayload, message, nil
 }
 
-func (s *gameState) buildDeltaSnapshotMessage(conn *wsConn, players []*player, foods []*food, cacti []*cactus, wormholes []*wormhole, forceFull bool, includeFoods bool) snapshotMessage {
-	playerDelta, foodDelta, cactusDelta, wormholeDelta, full := conn.computeSnapshotDelta(players, foods, cacti, wormholes, forceFull, includeFoods)
+func (s *gameState) buildDeltaSnapshotMessage(conn *wsConn, players []*player, foods []*food, cacti []*cactus, leeches []*leechVirus, wormholes []*wormhole, forceFull bool, includeFoods bool) snapshotMessage {
+	playerDelta, foodDelta, cactusDelta, leechDelta, wormholeDelta, full := conn.computeSnapshotDelta(players, foods, cacti, leeches, wormholes, forceFull, includeFoods)
 	return snapshotMessage{
 		Type:               "snapshot",
 		Full:               full,
@@ -1075,9 +1155,11 @@ func (s *gameState) buildDeltaSnapshotMessage(conn *wsConn, players []*player, f
 		RemovedPlayerIDs:   playerDelta.removedIDs,
 		Foods:              foodDelta.changed,
 		Cacti:              cactusDelta.changed,
+		Leeches:            leechDelta.changed,
 		Wormholes:          wormholeDelta.changed,
 		RemovedFoodIDs:     foodDelta.removedIDs,
 		RemovedCactusIDs:   cactusDelta.removedIDs,
+		RemovedLeechIDs:    leechDelta.removedIDs,
 		RemovedWormholeIDs: wormholeDelta.removedIDs,
 	}
 }
@@ -1087,7 +1169,7 @@ type objectDelta[T any] struct {
 	removedIDs []string
 }
 
-func (c *wsConn) computeSnapshotDelta(players []*player, foods []*food, cacti []*cactus, wormholes []*wormhole, forceFull bool, includeFoods bool) (objectDelta[player], objectDelta[food], objectDelta[cactus], objectDelta[wormhole], bool) {
+func (c *wsConn) computeSnapshotDelta(players []*player, foods []*food, cacti []*cactus, leeches []*leechVirus, wormholes []*wormhole, forceFull bool, includeFoods bool) (objectDelta[player], objectDelta[food], objectDelta[cactus], objectDelta[leechVirus], objectDelta[wormhole], bool) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 
@@ -1102,8 +1184,9 @@ func (c *wsConn) computeSnapshotDelta(players []*player, foods []*food, cacti []
 		foodDelta = diffFoodSet(&c.cache.foods, foods, full)
 	}
 	cactusDelta := diffCactusSet(&c.cache.cacti, cacti, full)
+	leechDelta := diffLeechSet(&c.cache.leeches, leeches, full)
 	wormholeDelta := diffWormholeSet(&c.cache.wormholes, wormholes, full)
-	return playerDelta, foodDelta, cactusDelta, wormholeDelta, full
+	return playerDelta, foodDelta, cactusDelta, leechDelta, wormholeDelta, full
 }
 
 func diffPlayerSet(cache *map[string]uint64, current []*player, full bool) objectDelta[player] {
@@ -1170,6 +1253,28 @@ func diffCactusSet(cache *map[string]uint64, current []*cactus, full bool) objec
 	releaseSignatureMap(*cache)
 	*cache = next
 	return objectDelta[cactus]{changed: changed, removedIDs: removed}
+}
+
+func diffLeechSet(cache *map[string]uint64, current []*leechVirus, full bool) objectDelta[leechVirus] {
+	previous := *cache
+	next := acquireSignatureMap(len(current))
+	changed := make([]*leechVirus, 0, len(current))
+	if full {
+		previous = nil
+	}
+
+	for _, item := range current {
+		signature := leechSignature(item)
+		next[item.ID] = signature
+		if full || previous == nil || previous[item.ID] != signature {
+			changed = append(changed, item)
+		}
+	}
+
+	removed := diffRemovedIDs(previous, next)
+	releaseSignatureMap(*cache)
+	*cache = next
+	return objectDelta[leechVirus]{changed: changed, removedIDs: removed}
 }
 
 func diffWormholeSet(cache *map[string]uint64, current []*wormhole, full bool) objectDelta[wormhole] {
@@ -1250,6 +1355,19 @@ func cactusSignature(item *cactus) uint64 {
 	return mixSignature(signature, quantizeSignature(item.Height))
 }
 
+func leechSignature(item *leechVirus) uint64 {
+	signature := uint64(1469598103934665603)
+	signature = mixSignature(signature, quantizeSignature(item.X))
+	signature = mixSignature(signature, quantizeSignature(item.Y))
+	signature = mixSignature(signature, quantizeSignature(item.Size))
+	signature = mixSignature(signature, quantizeSignature(item.Mass))
+	signature = mixSignature(signature, quantizeSignature(item.Angle))
+	signature = mixStringSignature(signature, item.AttachedTo)
+	signature = mixSignature(signature, uint64(quantizeDurationMillis(item.AttachedRemaining)))
+	signature = mixSignature(signature, uint64(quantizeDurationMillis(item.BurstRemaining)))
+	return signature
+}
+
 func wormholeSignature(item *wormhole) uint64 {
 	signature := uint64(1469598103934665603)
 	signature = mixSignature(signature, quantizeSignature(item.X))
@@ -1310,7 +1428,7 @@ func writeBinarySnapshot(conn *wsConn, message snapshotMessage) error {
 
 func encodeSnapshotBinary(buf *bytes.Buffer, conn *wsConn, message snapshotMessage) error {
 	buf.Reset()
-	buf.Write([]byte{'S', 'N', 'P', '1'})
+	buf.Write([]byte{'S', 'N', 'P', '2'})
 
 	var flags byte
 	if message.Full {
@@ -1325,6 +1443,8 @@ func encodeSnapshotBinary(buf *bytes.Buffer, conn *wsConn, message snapshotMessa
 		len(message.RemovedFoodIDs),
 		len(message.Cacti),
 		len(message.RemovedCactusIDs),
+		len(message.Leeches),
+		len(message.RemovedLeechIDs),
 		len(message.Wormholes),
 		len(message.RemovedWormholeIDs),
 	}
@@ -1360,6 +1480,16 @@ func encodeSnapshotBinary(buf *bytes.Buffer, conn *wsConn, message snapshotMessa
 		}
 	}
 	for _, id := range message.RemovedCactusIDs {
+		if err := writeStringBinary(buf, id); err != nil {
+			return err
+		}
+	}
+	for _, leech := range message.Leeches {
+		if err := writeLeechBinary(buf, leech); err != nil {
+			return err
+		}
+	}
+	for _, id := range message.RemovedLeechIDs {
 		if err := writeStringBinary(buf, id); err != nil {
 			return err
 		}
@@ -1560,6 +1690,23 @@ func writeCactusBinary(buf *bytes.Buffer, item *cactus) error {
 	return nil
 }
 
+func writeLeechBinary(buf *bytes.Buffer, item *leechVirus) error {
+	if err := writeStringBinary(buf, item.ID); err != nil {
+		return err
+	}
+	writeQuantU16(buf, item.X, coordQuantScale)
+	writeQuantU16(buf, item.Y, coordQuantScale)
+	writeQuantU16(buf, item.Size, radiusQuantScale)
+	writeQuantU16(buf, item.Mass, massQuantScale)
+	writeQuantU16(buf, item.Angle+math.Pi*2, scaleQuantScale)
+	if err := writeStringBinary(buf, item.AttachedTo); err != nil {
+		return err
+	}
+	writeU16Unsafe(buf, quantizeDurationMillis(item.AttachedRemaining))
+	writeU16Unsafe(buf, quantizeDurationMillis(item.BurstRemaining))
+	return nil
+}
+
 func writeWormholeBinary(buf *bytes.Buffer, item *wormhole) error {
 	if err := writeStringBinary(buf, item.ID); err != nil {
 		return err
@@ -1660,6 +1807,10 @@ func (s *gameState) seedCacti() {
 	}
 }
 
+func (s *gameState) seedLeeches() {
+	s.reconcileLeechesLocked()
+}
+
 func (s *gameState) reconcileCactiLocked() {
 	target := s.config.CactusCount
 	if target < 0 {
@@ -1672,6 +1823,21 @@ func (s *gameState) reconcileCactiLocked() {
 	}
 	for len(s.cacti) < target {
 		s.cacti = append(s.cacti, createCactus(s.worldSize()))
+	}
+}
+
+func (s *gameState) reconcileLeechesLocked() {
+	target := s.config.LeechCount
+	if target < 0 {
+		target = 0
+	}
+
+	for len(s.leeches) > target {
+		s.leeches[len(s.leeches)-1] = nil
+		s.leeches = s.leeches[:len(s.leeches)-1]
+	}
+	for len(s.leeches) < target {
+		s.leeches = append(s.leeches, createLeechVirus(s.worldSize()))
 	}
 }
 

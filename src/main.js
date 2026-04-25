@@ -167,9 +167,11 @@ const state = {
   renderPlayers: new Map(),
   foodMap: new Map(),
   cactusMap: new Map(),
+  leechMap: new Map(),
   wormholeMap: new Map(),
   foods: [],
   cacti: [],
+  leeches: [],
   wormholes: [],
   mouse: { x: window.innerWidth / 2, y: window.innerHeight / 2 },
   camera: { x: 0, y: 0 },
@@ -750,6 +752,7 @@ function render() {
   drawCacti();
   drawFoods();
   drawPlayers();
+  drawLeeches();
   ctx.restore();
   drawMinimap();
 }
@@ -1105,6 +1108,217 @@ function drawCacti() {
   ctx.restore();
 }
 
+function drawLeeches() {
+  const bounds = getVisibleWorldBounds(160);
+  ctx.save();
+  ctx.translate(canvas.width / 2 - state.camera.x, canvas.height / 2 - state.camera.y);
+
+  for (const leech of state.leeches) {
+    const size = leech.size || 18;
+    if (!isCircleInView(leech.x, leech.y, size * 2.4, bounds)) {
+      continue;
+    }
+    const phase = state.time * 5.8 + hashString(leech.id || "leech") * 0.00001;
+    if ((leech.burstRemaining || 0) > 0) {
+      drawLeechBurst(leech, size, phase);
+      continue;
+    }
+    const attached = Boolean(leech.attachedTo);
+    if (attached) {
+      const target = state.renderPlayers.get(leech.attachedTo);
+      if (target && !isRespawningPlayer(target)) {
+        drawAttachedLeech(leech, target, size, phase);
+        continue;
+      }
+    }
+    const wiggle = Math.sin(phase) * (attached ? 0.04 : 0.12);
+    const angle = (leech.angle || 0) + wiggle;
+    const bodyLength = size * (attached ? 2.35 : 2.75);
+    const bodyWidth = size * (attached ? 0.72 : 0.62);
+
+    ctx.save();
+    ctx.translate(leech.x, leech.y);
+    ctx.rotate(angle);
+
+    ctx.shadowColor = attached ? "rgba(255, 71, 94, 0.42)" : "rgba(4, 8, 14, 0.55)";
+    ctx.shadowBlur = attached ? 13 : 8;
+
+    const gradient = ctx.createRadialGradient(
+      -bodyLength * 0.24,
+      -bodyWidth * 0.3,
+      bodyWidth * 0.08,
+      0,
+      0,
+      bodyLength * 0.62,
+    );
+    gradient.addColorStop(0, attached ? "rgba(255, 132, 143, 0.96)" : "rgba(144, 93, 150, 0.95)");
+    gradient.addColorStop(0.48, attached ? "rgba(118, 28, 52, 0.98)" : "rgba(68, 38, 86, 0.98)");
+    gradient.addColorStop(1, attached ? "rgba(33, 10, 23, 0.98)" : "rgba(21, 15, 34, 0.98)");
+
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bodyLength * 0.5, bodyWidth * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = attached ? "rgba(255, 154, 163, 0.6)" : "rgba(185, 150, 216, 0.42)";
+    ctx.lineWidth = Math.max(1, size * 0.08);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bodyLength * 0.5, bodyWidth * 0.5, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = attached ? "rgba(255, 207, 213, 0.24)" : "rgba(229, 210, 255, 0.2)";
+    ctx.lineWidth = Math.max(1, size * 0.035);
+    for (let i = -2; i <= 2; i += 1) {
+      const x = i * bodyLength * 0.14;
+      ctx.beginPath();
+      ctx.ellipse(x, 0, bodyWidth * 0.22, bodyWidth * 0.48, 0.12 * i, Math.PI * 0.5, Math.PI * 1.5);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = attached ? "rgba(255, 47, 75, 0.86)" : "rgba(230, 86, 121, 0.72)";
+    ctx.beginPath();
+    ctx.ellipse(bodyLength * 0.42, 0, bodyWidth * 0.25, bodyWidth * 0.36, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = attached ? "rgba(255, 230, 234, 0.8)" : "rgba(255, 214, 224, 0.45)";
+    ctx.lineWidth = Math.max(1, size * 0.05);
+    ctx.beginPath();
+    ctx.ellipse(bodyLength * 0.44, 0, bodyWidth * 0.13, bodyWidth * 0.2, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,0.42)";
+    ctx.beginPath();
+    ctx.ellipse(-bodyLength * 0.16, -bodyWidth * 0.18, bodyLength * 0.16, bodyWidth * 0.09, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (attached) {
+      const pulse = 1 + Math.sin(phase * 1.8) * 0.08;
+      ctx.strokeStyle = "rgba(255, 84, 103, 0.48)";
+      ctx.lineWidth = Math.max(1, size * 0.08);
+      ctx.beginPath();
+      ctx.arc(bodyLength * 0.45, 0, bodyWidth * 0.38 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawAttachedLeech(leech, target, size, phase) {
+  const targetRadius = target.drawRadius || target.radius || 28;
+  const angle = Number.isFinite(leech.angle) ? leech.angle - Math.PI / 2 : Math.atan2(leech.y - target.drawY, leech.x - target.drawX);
+  const wrapRadius = Math.max(targetRadius * 0.78, targetRadius - size * 0.1);
+  const span = clampRange(0.7 + size / Math.max(80, targetRadius * 4), 0.62, 1.18);
+  const start = angle - span * 0.5;
+  const end = angle + span * 0.5;
+  const midX = target.drawX + Math.cos(angle) * wrapRadius;
+  const midY = target.drawY + Math.sin(angle) * wrapRadius;
+  const pulse = 1 + Math.sin(phase * 1.8) * 0.06;
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(255, 54, 80, 0.42)";
+  ctx.shadowBlur = 14;
+
+  ctx.strokeStyle = "rgba(44, 8, 20, 0.96)";
+  ctx.lineWidth = Math.max(6, size * 0.78 * pulse);
+  ctx.beginPath();
+  ctx.arc(target.drawX, target.drawY, wrapRadius, start, end);
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(132, 26, 54, 0.98)";
+  ctx.lineWidth = Math.max(5, size * 0.58 * pulse);
+  ctx.beginPath();
+  ctx.arc(target.drawX, target.drawY, wrapRadius, start, end);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(255, 128, 143, 0.62)";
+  ctx.lineWidth = Math.max(2, size * 0.16);
+  ctx.beginPath();
+  ctx.arc(target.drawX, target.drawY, wrapRadius - size * 0.1, start + 0.08, end - 0.08);
+  ctx.stroke();
+
+  for (let i = 0; i < 5; i += 1) {
+    const t = i / 4;
+    const ribAngle = lerp(start, end, t);
+    const x = target.drawX + Math.cos(ribAngle) * wrapRadius;
+    const y = target.drawY + Math.sin(ribAngle) * wrapRadius;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ribAngle + Math.PI / 2);
+    ctx.strokeStyle = "rgba(255, 205, 214, 0.22)";
+    ctx.lineWidth = Math.max(1, size * 0.055);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.18, size * 0.42, 0, Math.PI * 0.5, Math.PI * 1.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.fillStyle = "rgba(255, 44, 73, 0.92)";
+  ctx.beginPath();
+  ctx.ellipse(midX, midY, size * 0.38, size * 0.5, angle + Math.PI / 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(255, 230, 234, 0.8)";
+  ctx.lineWidth = Math.max(1, size * 0.06);
+  ctx.beginPath();
+  ctx.ellipse(midX, midY, size * 0.18, size * 0.28, angle + Math.PI / 2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(255, 64, 90, 0.42)";
+  ctx.lineWidth = Math.max(1, size * 0.08);
+  ctx.beginPath();
+  ctx.arc(midX, midY, size * 0.48 * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawLeechBurst(leech, size, phase) {
+  const remaining = clamp01((leech.burstRemaining || 0) / 1200);
+  const progress = 1 - remaining;
+  const seed = hashString(leech.id || "burst");
+
+  ctx.save();
+  ctx.translate(leech.x, leech.y);
+  ctx.globalAlpha = remaining;
+
+  ctx.strokeStyle = "rgba(255, 82, 105, 0.72)";
+  ctx.lineWidth = Math.max(1, size * 0.08);
+  ctx.beginPath();
+  ctx.arc(0, 0, size * (0.7 + progress * 1.7), 0, Math.PI * 2);
+  ctx.stroke();
+
+  for (let i = 0; i < 14; i += 1) {
+    const angle = (Math.PI * 2 * i) / 14 + seededUnit(seed, i) * 0.32;
+    const distance = size * (0.35 + progress * (1.6 + seededUnit(seed, i + 17) * 0.7));
+    const shardSize = size * (0.08 + seededUnit(seed, i + 31) * 0.11);
+    ctx.fillStyle = i % 3 === 0 ? "rgba(255, 210, 180, 0.82)" : "rgba(190, 28, 62, 0.86)";
+    ctx.beginPath();
+    ctx.ellipse(
+      Math.cos(angle) * distance,
+      Math.sin(angle) * distance,
+      shardSize * 1.5,
+      shardSize,
+      angle + phase * 0.15,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+  }
+
+  ctx.fillStyle = "rgba(70, 8, 24, 0.78)";
+  ctx.beginPath();
+  ctx.arc(0, 0, size * Math.max(0.2, 0.7 - progress * 0.45), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawPlayers() {
   const me = state.renderPlayers.get(state.playerId);
   const bounds = getVisibleWorldBounds(120);
@@ -1124,26 +1338,17 @@ function drawPlayers() {
     const canBeEaten = me && !isSameOwner && me.id !== player.id && canPlayerEatClient(player, me);
     const deformation = getFragmentDeformation(player);
 
-    ctx.fillStyle = player.color;
     ctx.save();
     ctx.translate(player.drawX, player.drawY);
     ctx.rotate(deformation.angle);
     ctx.scale(deformation.scaleX, deformation.scaleY);
-    ctx.beginPath();
-    ctx.arc(0, 0, player.drawRadius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.strokeStyle = isMe
-      ? "#ffffff"
-      : isSameOwner
-        ? "rgba(255,255,255,0.72)"
-        : canEat
-          ? "rgba(138,255,207,0.85)"
-          : canBeEaten
-            ? "rgba(255,139,157,0.85)"
-            : "rgba(255,255,255,0.35)";
-    ctx.lineWidth = (isMe ? 3 : isSameOwner ? 2.4 : 1.5) / Math.max(0.78, deformation.scaleX);
-    ctx.stroke();
+    drawDropletPlayerBody(player, {
+      isMe,
+      isSameOwner,
+      canEat,
+      canBeEaten,
+      deformation,
+    });
     ctx.restore();
 
     if (player.effectRemaining > 0) {
@@ -1159,19 +1364,454 @@ function drawPlayers() {
       drawBeneficialEffectRings(player, beneficialEffects);
     }
 
-    ctx.fillStyle = "#eef7ff";
-    const nameFontSize = Math.max(12, Math.min(player.drawRadius * 0.72, player.drawRadius * (player.nickname.length <= 4 ? 0.82 : 0.66)));
-    const massFontSize = Math.max(10, Math.min(player.drawRadius * 0.34, 28));
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.font = `700 ${nameFontSize}px Segoe UI`;
-    ctx.fillText(player.nickname, player.drawX, player.drawY - Math.min(10, player.drawRadius * 0.14));
-    ctx.font = `${massFontSize}px Segoe UI`;
-    ctx.fillStyle = "rgba(238,247,255,0.82)";
-    ctx.fillText(String(Math.round(effectiveCombatMassClient(player))), player.drawX, player.drawY + Math.min(16, player.drawRadius * 0.22));
+    drawPlayerLabel(player);
   }
 
   ctx.restore();
+}
+
+function drawPlayerLabel(player) {
+  const nameFontSize = Math.max(12, Math.min(player.drawRadius * 0.58, player.drawRadius * (player.nickname.length <= 4 ? 0.7 : 0.56)));
+  const massFontSize = Math.max(10, Math.min(player.drawRadius * 0.3, 24));
+  const nameY = player.drawY - Math.min(10, player.drawRadius * 0.14);
+  const massY = player.drawY + Math.min(16, player.drawRadius * 0.22);
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(2, 8, 18, 0.85)";
+  ctx.shadowBlur = 7;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(2, 8, 18, 0.58)";
+  ctx.fillStyle = "#eef7ff";
+  ctx.font = `700 ${nameFontSize}px Segoe UI`;
+  ctx.strokeText(player.nickname, player.drawX, nameY);
+  ctx.fillText(player.nickname, player.drawX, nameY);
+  ctx.font = `${massFontSize}px Segoe UI`;
+  ctx.fillStyle = "rgba(238,247,255,0.82)";
+  const massText = String(Math.round(effectiveCombatMassClient(player)));
+  ctx.strokeText(massText, player.drawX, massY);
+  ctx.fillText(massText, player.drawX, massY);
+  ctx.restore();
+}
+
+function drawDropletPlayerBody(player, flags) {
+  const radius = player.drawRadius;
+  const screenRadius = radius * state.zoom;
+  const quality = getDropletRenderQuality(radius, screenRadius);
+  const seed = hashString(player.id || player.nickname || player.color || "cell");
+  const palette = getDropletPalette(player.color, seed);
+  const stretchFix = 1 / Math.max(0.78, flags.deformation.scaleX);
+
+  if (quality === "simple") {
+    ctx.fillStyle = player.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.fill();
+    drawDropletOutline(radius, flags, stretchFix);
+    return;
+  }
+
+  const phase = state.time * 2.8 + player.drawX * 0.009 + player.drawY * 0.007;
+  const pulse = Math.sin(phase) * 0.018;
+  const wobbleScale = quality === "rich" ? 1 + pulse : 1;
+
+  ctx.save();
+  ctx.scale(wobbleScale, 1 - pulse * 0.45);
+
+  const body = ctx.createRadialGradient(
+    -radius * 0.26,
+    -radius * 0.32,
+    radius * 0.08,
+    radius * 0.08,
+    radius * 0.12,
+    radius * 1.08,
+  );
+  body.addColorStop(0, palette.membraneLight);
+  body.addColorStop(0.28, palette.cytoplasmLight);
+  body.addColorStop(0.52, palette.cytoplasm);
+  body.addColorStop(0.78, palette.cytoplasmDeep);
+  body.addColorStop(1, palette.membraneEdge);
+
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (quality !== "simple") {
+    drawCellInterior(radius, palette, phase, quality, seed);
+  }
+
+  drawDropletGlass(radius, palette, quality, phase, seed);
+  drawDropletOutline(radius, flags, stretchFix);
+  ctx.restore();
+}
+
+function getDropletRenderQuality(radius, screenRadius) {
+  if (screenRadius < 9 || radius < 10) {
+    return "simple";
+  }
+  if (screenRadius < 22 || radius < 22 || state.renderPlayers.size > 80) {
+    return "medium";
+  }
+  return "rich";
+}
+
+function drawDropletGlass(radius, palette, quality, phase, seed) {
+  const rim = ctx.createRadialGradient(
+    radius * 0.18,
+    radius * 0.24,
+    radius * 0.42,
+    0,
+    0,
+    radius * 1.03,
+  );
+  rim.addColorStop(0, "rgba(255,255,255,0)");
+  rim.addColorStop(0.62, "rgba(255,255,255,0)");
+  rim.addColorStop(0.86, palette.rim);
+  rim.addColorStop(1, palette.membraneStroke);
+  ctx.fillStyle = rim;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (quality === "rich") {
+    drawMembraneTexture(radius, palette, phase, seed);
+  }
+
+  ctx.fillStyle = quality === "rich" ? "rgba(235,247,255,0.3)" : "rgba(235,247,255,0.2)";
+  ctx.beginPath();
+  ctx.ellipse(
+    -radius * 0.28 + Math.sin(phase * 1.2) * radius * 0.025,
+    -radius * 0.34 + Math.cos(phase) * radius * 0.018,
+    radius * 0.2,
+    radius * 0.09,
+    -0.55,
+    0,
+    Math.PI * 2,
+  );
+  ctx.fill();
+
+  if (quality !== "rich") {
+    return;
+  }
+
+  ctx.strokeStyle = "rgba(210,232,255,0.32)";
+  ctx.lineWidth = Math.max(1, radius * 0.03);
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(-radius * 0.05, -radius * 0.04, radius * 0.62, Math.PI * 1.1, Math.PI * 1.55);
+  ctx.stroke();
+}
+
+function drawMembraneTexture(radius, palette, phase, seed) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = palette.membraneBand;
+  ctx.lineWidth = Math.max(1, radius * 0.018);
+  for (let i = 0; i < 3; i += 1) {
+    const start = Math.PI * (0.08 + seededUnit(seed, i + 151) * 0.46) + Math.sin(phase * 0.35 + i) * 0.08;
+    const end = start + Math.PI * (0.36 + seededUnit(seed, i + 161) * 0.18);
+    const bandRadius = radius * (0.66 + i * 0.09);
+    ctx.beginPath();
+    ctx.arc(0, 0, bandRadius, start, end);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = palette.membranePore;
+  for (let i = 0; i < 12; i += 1) {
+    const angle = seededUnit(seed, i + 171) * Math.PI * 2 + phase * 0.025;
+    const distance = radius * (0.72 + seededUnit(seed, i + 181) * 0.2);
+    const x = Math.cos(angle) * distance;
+    const y = Math.sin(angle) * distance;
+    ctx.beginPath();
+    ctx.arc(x, y, radius * (0.008 + seededUnit(seed, i + 191) * 0.01), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCellInterior(radius, palette, phase, quality, seed) {
+  drawCellNucleus(radius, palette, phase, seed, quality);
+
+  ctx.save();
+  ctx.globalAlpha = quality === "rich" ? 0.42 : 0.24;
+
+  if (quality === "rich") {
+    ctx.strokeStyle = palette.strand;
+    ctx.lineWidth = Math.max(1, radius * 0.012);
+    ctx.lineCap = "round";
+    for (let i = 0; i < 5; i += 1) {
+      const angle = phase * 0.22 + i * 1.9 + seededUnit(seed, i) * 0.7;
+      const x = Math.cos(angle) * radius * (0.16 + seededUnit(seed, i + 9) * 0.3);
+      const y = Math.sin(angle) * radius * (0.14 + seededUnit(seed, i + 17) * 0.28);
+      ctx.beginPath();
+      ctx.moveTo(x - radius * 0.14, y + Math.sin(phase + i) * radius * 0.03);
+      ctx.bezierCurveTo(
+        x - radius * 0.02,
+        y - radius * 0.08,
+        x + radius * 0.08,
+        y + radius * 0.07,
+        x + radius * 0.18,
+        y - Math.cos(phase + i) * radius * 0.025,
+      );
+      ctx.stroke();
+    }
+
+    for (let i = 0; i < 7; i += 1) {
+      const angle = seededUnit(seed, i + 211) * Math.PI * 2 + phase * (0.018 + seededUnit(seed, i + 221) * 0.025);
+      const distance = radius * Math.sqrt(seededUnit(seed, i + 231)) * 0.58;
+      const x = Math.cos(angle) * distance;
+      const y = Math.sin(angle * 1.09) * distance * 0.85;
+      const vesicleRadius = radius * (0.035 + seededUnit(seed, i + 241) * 0.045);
+      ctx.fillStyle = palette.vesicle;
+      ctx.beginPath();
+      ctx.arc(x, y, vesicleRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = palette.vesicleRing;
+      ctx.lineWidth = Math.max(1, radius * 0.008);
+      ctx.beginPath();
+      ctx.arc(x, y, vesicleRadius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  const granuleCount = quality === "rich" ? 74 : 22;
+  ctx.lineCap = "round";
+  for (let i = 0; i < granuleCount; i += 1) {
+    const angle = seededUnit(seed, i + 31) * Math.PI * 2 + phase * (0.025 + seededUnit(seed, i + 41) * 0.035);
+    const distance = radius * Math.sqrt(seededUnit(seed, i + 53)) * 0.78;
+    const x = Math.cos(angle) * distance;
+    const y = Math.sin(angle * 1.11) * distance * 0.86;
+    const dotRadius = radius * (0.006 + seededUnit(seed, i + 67) * (quality === "rich" ? 0.018 : 0.012));
+    ctx.fillStyle = i % 7 === 0 ? palette.granuleLight : i % 4 === 0 ? palette.granuleDark : palette.granule;
+    ctx.beginPath();
+    ctx.arc(x, y, dotRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCellNucleus(radius, palette, phase, seed, quality) {
+  const nucleusRadius = radius * (quality === "rich" ? 0.27 : 0.23);
+  const x = radius * (-0.03 + (seededUnit(seed, 3) - 0.5) * 0.18) + Math.sin(phase * 0.55) * radius * 0.018;
+  const y = radius * (0.04 + (seededUnit(seed, 5) - 0.5) * 0.16) + Math.cos(phase * 0.5) * radius * 0.014;
+  const nucleus = ctx.createRadialGradient(
+    x - nucleusRadius * 0.28,
+    y - nucleusRadius * 0.34,
+    nucleusRadius * 0.12,
+    x,
+    y,
+    nucleusRadius,
+  );
+  nucleus.addColorStop(0, palette.nucleusLight);
+  nucleus.addColorStop(0.58, palette.nucleus);
+  nucleus.addColorStop(1, palette.nucleusEdge);
+
+  ctx.fillStyle = nucleus;
+  ctx.beginPath();
+  ctx.ellipse(x, y, nucleusRadius * 1.04, nucleusRadius * 0.92, Math.sin(phase) * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = palette.nucleusRing;
+  ctx.lineWidth = Math.max(1, radius * 0.02);
+  ctx.beginPath();
+  ctx.ellipse(x, y, nucleusRadius * 1.04, nucleusRadius * 0.92, Math.sin(phase) * 0.2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  if (quality !== "rich") {
+    return;
+  }
+
+  ctx.fillStyle = palette.nucleolus;
+  ctx.beginPath();
+  ctx.arc(x + nucleusRadius * 0.16, y - nucleusRadius * 0.12, nucleusRadius * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = palette.chromatin;
+  for (let i = 0; i < 7; i += 1) {
+    const angle = seededUnit(seed, i + 271) * Math.PI * 2 + phase * 0.035;
+    const distance = nucleusRadius * Math.sqrt(seededUnit(seed, i + 281)) * 0.62;
+    ctx.beginPath();
+    ctx.arc(
+      x + Math.cos(angle) * distance,
+      y + Math.sin(angle * 1.13) * distance * 0.82,
+      nucleusRadius * (0.035 + seededUnit(seed, i + 291) * 0.045),
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+  }
+}
+
+function drawDropletOutline(radius, flags, stretchFix) {
+  ctx.strokeStyle = flags.isMe
+    ? "#ffffff"
+    : flags.isSameOwner
+      ? "rgba(255,255,255,0.72)"
+      : flags.canEat
+        ? "rgba(138,255,207,0.85)"
+        : flags.canBeEaten
+          ? "rgba(255,139,157,0.85)"
+          : "rgba(255,255,255,0.34)";
+  ctx.lineWidth = (flags.isMe ? 3 : flags.isSameOwner ? 2.4 : 1.5) * stretchFix;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function getDropletPalette(color, seed) {
+  const rgb = parseHexColor(color) || { r: 138, g: 255, b: 207 };
+  const accent = getCellAccentPalette(rgb, seed);
+  const membraneLight = mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.5);
+  const membrane = mixRgb(accent.membrane, rgb, 0.22);
+  const cytoplasmLight = mixRgb(accent.cytoplasm, { r: 255, g: 255, b: 255 }, 0.42);
+  const cytoplasm = mixRgb(accent.cytoplasm, rgb, 0.2);
+  const cytoplasmDeep = mixRgb(accent.cytoplasm, accent.membrane, 0.38);
+  const nucleus = mixRgb(accent.nucleus, rgb, 0.12);
+  const nucleusEdge = mixRgb(accent.nucleusEdge, rgb, 0.08);
+  const granule = mixRgb(accent.granule, rgb, 0.16);
+  return {
+    cytoplasmLight: rgbToCss(cytoplasmLight, 0.62),
+    cytoplasm: rgbToCss(cytoplasm, 0.52),
+    cytoplasmDeep: rgbToCss(cytoplasmDeep, 0.48),
+    membraneLight: rgbToCss(membraneLight, 0.56),
+    membrane: rgbToCss(membrane, 0.42),
+    membraneEdge: rgbToCss(mixRgb(accent.membrane, { r: 10, g: 22, b: 44 }, 0.42), 0.2),
+    membraneStroke: rgbToCss(mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.24), 0.5),
+    rim: rgbToCss(mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.48), 0.42),
+    membraneBand: rgbToCss(mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.28), 0.28),
+    membranePore: rgbToCss(mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.36), 0.4),
+    strand: rgbToCss(mixRgb(accent.cytoplasm, { r: 255, g: 255, b: 255 }, 0.58), 0.46),
+    vesicle: rgbToCss(mixRgb(accent.cytoplasm, { r: 255, g: 255, b: 255 }, 0.48), 0.24),
+    vesicleRing: rgbToCss(mixRgb(accent.membrane, { r: 255, g: 255, b: 255 }, 0.4), 0.28),
+    granule: rgbToCss(granule, 0.5),
+    granuleLight: rgbToCss(mixRgb(accent.granule, { r: 255, g: 255, b: 255 }, 0.4), 0.4),
+    granuleDark: rgbToCss(mixRgb(accent.nucleusEdge, { r: 18, g: 16, b: 24 }, 0.38), 0.58),
+    nucleus: rgbToCss(nucleus, 0.92),
+    nucleusLight: rgbToCss(mixRgb(accent.nucleus, { r: 255, g: 244, b: 240 }, 0.56), 0.9),
+    nucleusEdge: rgbToCss(nucleusEdge, 0.88),
+    nucleusRing: rgbToCss(mixRgb(accent.nucleus, { r: 255, g: 255, b: 255 }, 0.5), 0.48),
+    nucleolus: "rgba(255, 241, 237, 0.46)",
+    chromatin: rgbToCss(mixRgb(accent.nucleusEdge, accent.nucleus, 0.3), 0.34),
+  };
+}
+
+function getCellAccentPalette(rgb, seed) {
+  const baseHue = rgbToHue(rgb);
+  const membraneHue = wrapHue(baseHue + (seededUnit(seed, 311) - 0.5) * 44);
+  const cytoplasmHue = wrapHue(baseHue + 16 + (seededUnit(seed, 321) - 0.5) * 64);
+  const nucleusHue = wrapHue(baseHue + 105 + seededUnit(seed, 331) * 138);
+  const granuleHue = wrapHue(nucleusHue + 24 + (seededUnit(seed, 341) - 0.5) * 56);
+  const membraneSaturation = 58 + seededUnit(seed, 351) * 24;
+  const cytoplasmSaturation = 48 + seededUnit(seed, 361) * 26;
+  const nucleusSaturation = 64 + seededUnit(seed, 371) * 22;
+  return {
+    membrane: hslToRgb(membraneHue, membraneSaturation, 64 + seededUnit(seed, 381) * 8),
+    cytoplasm: hslToRgb(cytoplasmHue, cytoplasmSaturation, 68 + seededUnit(seed, 391) * 8),
+    nucleus: hslToRgb(nucleusHue, nucleusSaturation, 57 + seededUnit(seed, 401) * 8),
+    nucleusEdge: hslToRgb(nucleusHue, nucleusSaturation + 8, 28 + seededUnit(seed, 411) * 8),
+    granule: hslToRgb(granuleHue, 48 + seededUnit(seed, 421) * 22, 42 + seededUnit(seed, 431) * 10),
+  };
+}
+
+function parseHexColor(color) {
+  if (typeof color !== "string" || !color.startsWith("#")) {
+    return null;
+  }
+  const raw = color.length === 4
+    ? color.slice(1).split("").map((part) => part + part).join("")
+    : color.slice(1, 7);
+  if (!/^[0-9a-f]{6}$/i.test(raw)) {
+    return null;
+  }
+  return {
+    r: parseInt(raw.slice(0, 2), 16),
+    g: parseInt(raw.slice(2, 4), 16),
+    b: parseInt(raw.slice(4, 6), 16),
+  };
+}
+
+function mixRgb(a, b, amount) {
+  return {
+    r: Math.round(lerp(a.r, b.r, amount)),
+    g: Math.round(lerp(a.g, b.g, amount)),
+    b: Math.round(lerp(a.b, b.b, amount)),
+  };
+}
+
+function rgbToCss(rgb, alpha = 1) {
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+function rgbToHue(rgb) {
+  const r = rgb.r / 255;
+  const g = rgb.g / 255;
+  const b = rgb.b / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  if (delta === 0) {
+    return 0;
+  }
+  let hue;
+  if (max === r) {
+    hue = ((g - b) / delta) % 6;
+  } else if (max === g) {
+    hue = (b - r) / delta + 2;
+  } else {
+    hue = (r - g) / delta + 4;
+  }
+  return (hue * 60 + 360) % 360;
+}
+
+function wrapHue(hue) {
+  return (hue % 360 + 360) % 360;
+}
+
+function hslToRgb(hue, saturation, lightness) {
+  const h = wrapHue(hue) / 360;
+  const s = clampRange(saturation, 0, 100) / 100;
+  const l = clampRange(lightness, 0, 100) / 100;
+  if (s === 0) {
+    const value = Math.round(l * 255);
+    return { r: value, g: value, b: value };
+  }
+
+  const hueToRgb = (p, q, t) => {
+    let nextT = t;
+    if (nextT < 0) nextT += 1;
+    if (nextT > 1) nextT -= 1;
+    if (nextT < 1 / 6) return p + (q - p) * 6 * nextT;
+    if (nextT < 1 / 2) return q;
+    if (nextT < 2 / 3) return p + (q - p) * (2 / 3 - nextT) * 6;
+    return p;
+  };
+
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: Math.round(hueToRgb(p, q, h + 1 / 3) * 255),
+    g: Math.round(hueToRgb(p, q, h) * 255),
+    b: Math.round(hueToRgb(p, q, h - 1 / 3) * 255),
+  };
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededUnit(seed, salt) {
+  let value = seed ^ Math.imul(salt + 1, 2246822519);
+  value ^= value >>> 15;
+  value = Math.imul(value, 3266489917);
+  value ^= value >>> 16;
+  return (value >>> 0) / 4294967295;
 }
 
 function drawBeneficialEffectRings(player, effects) {
@@ -1200,17 +1840,20 @@ function applySnapshotObjects(data) {
     state.playerMap.clear();
     state.foodMap.clear();
     state.cactusMap.clear();
+    state.leechMap.clear();
     state.wormholeMap.clear();
   }
 
   applyObjectDelta(state.playerMap, data.players, data.removedPlayerIds);
   applyObjectDelta(state.foodMap, data.foods, data.removedFoodIds);
   applyObjectDelta(state.cactusMap, data.cacti, data.removedCactusIds);
+  applyObjectDelta(state.leechMap, data.leeches, data.removedLeechIds);
   applyObjectDelta(state.wormholeMap, data.wormholes, data.removedWormholeIds);
 
   state.players = Array.from(state.playerMap.values());
   state.foods = Array.from(state.foodMap.values());
   state.cacti = Array.from(state.cactusMap.values());
+  state.leeches = Array.from(state.leechMap.values());
   state.wormholes = Array.from(state.wormholeMap.values());
 }
 
@@ -1262,11 +1905,11 @@ function decodeSnapshotBinary(bufferLike) {
   let offset = 0;
 
   if (
-    view.byteLength < 21 ||
+    view.byteLength < 25 ||
     view.getUint8(offset++) !== 83 ||
     view.getUint8(offset++) !== 78 ||
     view.getUint8(offset++) !== 80 ||
-    view.getUint8(offset++) !== 49
+    view.getUint8(offset++) !== 50
   ) {
     return null;
   }
@@ -1274,7 +1917,7 @@ function decodeSnapshotBinary(bufferLike) {
   const flags = view.getUint8(offset++);
   const full = (flags & 1) === 1;
   const counts = [];
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     counts.push(view.getUint16(offset, true));
     offset += 2;
   }
@@ -1313,12 +1956,20 @@ function decodeSnapshotBinary(bufferLike) {
   for (let i = 0; i < counts[5]; i += 1) {
     removedCactusIds.push(readBinaryString(reader));
   }
-  const wormholes = [];
+  const leeches = [];
   for (let i = 0; i < counts[6]; i += 1) {
+    leeches.push(readBinaryLeech(reader));
+  }
+  const removedLeechIds = [];
+  for (let i = 0; i < counts[7]; i += 1) {
+    removedLeechIds.push(readBinaryString(reader));
+  }
+  const wormholes = [];
+  for (let i = 0; i < counts[8]; i += 1) {
     wormholes.push(readBinaryWormhole(reader));
   }
   const removedWormholeIds = [];
-  for (let i = 0; i < counts[7]; i += 1) {
+  for (let i = 0; i < counts[9]; i += 1) {
     removedWormholeIds.push(readBinaryString(reader));
   }
 
@@ -1331,6 +1982,8 @@ function decodeSnapshotBinary(bufferLike) {
     removedFoodIds,
     cacti,
     removedCactusIds,
+    leeches,
+    removedLeechIds,
     wormholes,
     removedWormholeIds,
   };
@@ -1420,6 +2073,20 @@ function readBinaryCactus(reader) {
     y: readQuantU16(reader, COORD_QUANT_SCALE),
     size: readQuantU16(reader, RADIUS_QUANT_SCALE),
     height: readQuantU16(reader, RADIUS_QUANT_SCALE),
+  };
+}
+
+function readBinaryLeech(reader) {
+  return {
+    id: readBinaryString(reader),
+    x: readQuantU16(reader, COORD_QUANT_SCALE),
+    y: readQuantU16(reader, COORD_QUANT_SCALE),
+    size: readQuantU16(reader, RADIUS_QUANT_SCALE),
+    mass: readQuantU16(reader, MASS_QUANT_SCALE),
+    angle: readQuantU16(reader, SCALE_QUANT_SCALE) - Math.PI * 2,
+    attachedTo: readBinaryString(reader),
+    attachedRemaining: readDurationU16(reader),
+    burstRemaining: readDurationU16(reader),
   };
 }
 

@@ -157,6 +157,27 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	if req.WormholeRelocateSeconds != nil {
 		s.config.WormholeRelocateSeconds = int(math.Max(0, float64(*req.WormholeRelocateSeconds)))
 	}
+	if req.LeechCount != nil {
+		s.config.LeechCount = int(math.Max(0, float64(*req.LeechCount)))
+	}
+	if req.LeechAttachSeconds != nil {
+		s.config.LeechAttachSeconds = *req.LeechAttachSeconds
+	}
+	if req.LeechDrainPercent != nil {
+		s.config.LeechDrainPercent = *req.LeechDrainPercent
+	}
+	if req.LeechFedCooldownSeconds != nil {
+		s.config.LeechFedCooldownSeconds = *req.LeechFedCooldownSeconds
+	}
+	if req.LeechMaxMass != nil {
+		s.config.LeechMaxMass = *req.LeechMaxMass
+	}
+	if req.LeechSwimSpeed != nil {
+		s.config.LeechSwimSpeed = *req.LeechSwimSpeed
+	}
+	if req.LeechMaxSizeScale != nil {
+		s.config.LeechMaxSizeScale = *req.LeechMaxSizeScale
+	}
 	if req.WorldSize != nil {
 		s.config.WorldSize = sanitizeWorldSize(*req.WorldSize)
 	}
@@ -173,6 +194,7 @@ func (s *gameState) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	s.clampWorldObjectsLocked()
 	s.reconcileProbioticsLocked()
 	s.reconcileCactiLocked()
+	s.reconcileLeechesLocked()
 	s.reconcileWormholesLocked()
 	s.reconcileBotsLocked()
 	s.lastProbioticSpawn = time.Now()
@@ -284,6 +306,13 @@ func defaultRuntimeConfig() runtimeConfig {
 		WormholePairs:           defaultWormholePairs,
 		CactusRelocateSeconds:   0,
 		WormholeRelocateSeconds: 0,
+		LeechCount:              leechTarget,
+		LeechAttachSeconds:      int(leechAttachDuration / time.Second),
+		LeechDrainPercent:       leechDrainFraction * 100,
+		LeechFedCooldownSeconds: int(leechFedCooldown / time.Second),
+		LeechMaxMass:            leechMaxMass,
+		LeechSwimSpeed:          leechSwimSpeed,
+		LeechMaxSizeScale:       leechMaxSizeScale,
 		WorldSize:               defaultWorldSize,
 		BaseSpeed:               defaultBaseSpeed,
 		SpeedDivisor:            defaultSpeedDivisor,
@@ -337,6 +366,18 @@ func normalizeRuntimeConfig(config runtimeConfig) runtimeConfig {
 	config.WormholePairs = int(math.Max(0, float64(config.WormholePairs)))
 	config.CactusRelocateSeconds = int(math.Max(0, float64(config.CactusRelocateSeconds)))
 	config.WormholeRelocateSeconds = int(math.Max(0, float64(config.WormholeRelocateSeconds)))
+	config.LeechCount = int(clamp(float64(config.LeechCount), 0, 80))
+	config.LeechAttachSeconds = int(clamp(float64(config.LeechAttachSeconds), 5, 120))
+	config.LeechDrainPercent = math.Max(0, config.LeechDrainPercent)
+	config.LeechFedCooldownSeconds = int(clamp(float64(config.LeechFedCooldownSeconds), 0, 60))
+	if config.LeechMaxMass <= 0 {
+		config.LeechMaxMass = leechMaxMass
+	}
+	config.LeechSwimSpeed = clamp(config.LeechSwimSpeed, 5, 180)
+	if config.LeechMaxSizeScale <= 0 {
+		config.LeechMaxSizeScale = leechMaxSizeScale
+	}
+	config.LeechMaxSizeScale = math.Max(1.0, config.LeechMaxSizeScale)
 	config.WorldSize = sanitizeWorldSize(config.WorldSize)
 	config.BaseSpeed = math.Max(50, config.BaseSpeed)
 	config.SpeedDivisor = math.Max(1, config.SpeedDivisor)

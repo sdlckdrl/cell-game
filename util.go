@@ -88,7 +88,13 @@ func abilityName(cellType string) string {
 }
 
 func randomColor() string {
-	colors := []string{"#60b9ff", "#8affcf", "#ffcf70", "#ff8b9d", "#c1a6ff"}
+	colors := []string{
+		"#60b9ff", "#8affcf", "#ffcf70", "#ff8b9d", "#c1a6ff", "#7de36d",
+		"#4dd7d0", "#ff9f5f", "#f576d0", "#a7d86b", "#6f8cff", "#f06f6f",
+		"#52e0a4", "#d8b35f", "#b985ff", "#ff7ab6", "#72d6ff", "#b7e36a",
+		"#f98f7a", "#8cc8ff", "#64d484", "#d787ff", "#ffd45f", "#74e0e0",
+		"#e97d8c", "#9be07c", "#c7a0ff", "#ffb36d",
+	}
 	return colors[mathrand.Intn(len(colors))]
 }
 
